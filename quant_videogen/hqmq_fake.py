@@ -27,6 +27,7 @@ class FakeHQMQConfig:
     pad_head_dim: bool = True
     log_radius: bool = False
     median_mult: float | None = None
+    max_sim_elements: int = 268_435_456
 
     @classmethod
     def from_quant_config(cls, quant_type: str, quant_config: Any) -> "FakeHQMQConfig":
@@ -40,6 +41,7 @@ class FakeHQMQConfig:
             pad_head_dim=bool(getattr(quant_config, "hqmq_pad_head_dim", True)),
             log_radius=bool(getattr(quant_config, "hqmq_log_radius", False)),
             median_mult=None if median_mult is None else float(median_mult),
+            max_sim_elements=int(getattr(quant_config, "hqmq_max_sim_elements", 268_435_456)),
         )
 
     def validate(self) -> None:
@@ -49,6 +51,8 @@ class FakeHQMQConfig:
             raise ValueError(f"hqmq_radius_bits must be non-negative, got {self.radius_bits}")
         if self.median_mult is not None and self.median_mult <= 0:
             raise ValueError(f"hqmq_median_mult must be positive, got {self.median_mult}")
+        if self.max_sim_elements <= 0:
+            raise ValueError(f"hqmq_max_sim_elements must be positive, got {self.max_sim_elements}")
 
 
 def relative_l2_error(reference: torch.Tensor, reconstructed: torch.Tensor) -> float:
@@ -101,6 +105,7 @@ class FakeHQMQCacheAdapter:
         self._secondary_layers = 0
         self._secondary_heads = 0
         self.last_diagnostics: list[dict[str, Any]] = []
+        self.last_tile_stats: dict[str, int] | None = None
 
     @classmethod
     def from_quant_config(cls, quant_type: str, quant_config: Any) -> "FakeHQMQCacheAdapter":
@@ -124,6 +129,7 @@ class FakeHQMQCacheAdapter:
         layer_idx: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         self.last_diagnostics = []
+        self.last_tile_stats = None
         k_quant = self.quantize_k(k, layer_idx=layer_idx)
         v_quant = self.quantize_v(v, layer_idx=layer_idx)
         return k_quant, v_quant
@@ -202,6 +208,7 @@ class FakeHQMQCacheAdapter:
             work = torch.cat([work, pad], dim=-1)
 
         quantized = self._quantize_padded(work, layer_idx=layer_idx, kv=kv, heads=heads)
+        tile_stats = self.last_tile_stats or {}
         if self.config.median_mult is not None:
             quantized, outlier_rate = self._restore_outliers(work, quantized)
         else:
@@ -229,6 +236,12 @@ class FakeHQMQCacheAdapter:
             "log_radius": self.config.log_radius,
             "median_mult": self.config.median_mult,
             "outlier_rate": outlier_rate,
+            "max_sim_elements": self.config.max_sim_elements,
+            "sim_tile_tokens": tile_stats.get("sim_tile_tokens"),
+            "sim_codeword_tile": tile_stats.get("sim_codeword_tile"),
+            "sim_tile_count": tile_stats.get("sim_tile_count"),
+            "max_sim_tile_elements": tile_stats.get("max_sim_tile_elements"),
+            "dense_sim_elements": tile_stats.get("dense_sim_elements"),
             "relative_l2": relative_l2_error(x, quantized),
             "finite": bool(torch.isfinite(quantized).all().detach().cpu().item()),
         }
@@ -243,15 +256,62 @@ class FakeHQMQCacheAdapter:
         direction = chunked / radius
 
         joint = self._joint_codebook(layer_idx=layer_idx, kv=kv, heads=heads, device=x.device)
-        sims = torch.einsum("bhtnc,hkc->bhtnk", direction, joint)
-        idx = sims.argmax(dim=-1)
-        joint_expanded = joint.view(1, heads, 1, 1, joint.shape[1], self.chunk_dim).expand(
-            bsz, heads, seq_len, n_chunks, joint.shape[1], self.chunk_dim
-        )
-        gather_idx = idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, -1, 1, self.chunk_dim)
-        direction_quant = joint_expanded.gather(dim=-2, index=gather_idx).squeeze(-2)
+        direction_quant = self._nearest_joint_directions(direction, joint)
         radius_quant = self._quantize_radius(radius)
         return (radius_quant * direction_quant).reshape(bsz, heads, seq_len, head_dim)
+
+    def _nearest_joint_directions(self, direction: torch.Tensor, joint: torch.Tensor) -> torch.Tensor:
+        bsz, heads, seq_len, n_chunks, _ = direction.shape
+        codewords = joint.shape[1]
+        dense_sim_elements = bsz * heads * seq_len * n_chunks * codewords
+        tile_denominator = bsz * heads * n_chunks * codewords
+        tile_tokens = max(1, min(seq_len, self.config.max_sim_elements // tile_denominator))
+        codeword_denominator = bsz * heads * tile_tokens * n_chunks
+        codeword_tile = max(1, min(codewords, self.config.max_sim_elements // codeword_denominator))
+
+        output = torch.empty_like(direction)
+        max_tile_elements = 0
+        tile_count = 0
+        joint_for_gather = joint.unsqueeze(0).unsqueeze(2).unsqueeze(2).expand(
+            bsz, heads, 1, 1, codewords, self.chunk_dim
+        )
+
+        for start in range(0, seq_len, tile_tokens):
+            end = min(start + tile_tokens, seq_len)
+            tile = direction[:, :, start:end]
+            best_scores = None
+            idx = None
+
+            for code_start in range(0, codewords, codeword_tile):
+                code_end = min(code_start + codeword_tile, codewords)
+                sims = torch.einsum("bhtnc,hkc->bhtnk", tile, joint[:, code_start:code_end])
+                tile_scores, tile_idx = sims.max(dim=-1)
+                tile_idx = tile_idx + code_start
+                if best_scores is None or idx is None:
+                    best_scores = tile_scores
+                    idx = tile_idx
+                else:
+                    update = tile_scores > best_scores
+                    best_scores = torch.where(update, tile_scores, best_scores)
+                    idx = torch.where(update, tile_idx, idx)
+                max_tile_elements = max(max_tile_elements, sims.numel())
+                tile_count += 1
+
+            if idx is None:
+                raise RuntimeError("HQMQ fake did not evaluate any codewords")
+            gather_idx = idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, -1, 1, self.chunk_dim)
+            output[:, :, start:end] = joint_for_gather.expand(
+                bsz, heads, end - start, n_chunks, codewords, self.chunk_dim
+            ).gather(dim=-2, index=gather_idx).squeeze(-2)
+
+        self.last_tile_stats = {
+            "sim_tile_tokens": tile_tokens,
+            "sim_codeword_tile": codeword_tile,
+            "sim_tile_count": tile_count,
+            "max_sim_tile_elements": max_tile_elements,
+            "dense_sim_elements": dense_sim_elements,
+        }
+        return output
 
     def _quantize_radius(self, radius: torch.Tensor) -> torch.Tensor:
         if self.config.radius_bits >= 16:

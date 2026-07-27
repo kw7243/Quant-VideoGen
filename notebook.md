@@ -386,3 +386,35 @@ Smoke command in the Slurm script runs one prompt with `--num_output_frames 27`,
 `--local_attn_size 27`, and `--quant_type hqmq-fake`. This is the smallest
 configuration I found that should reach Self-Forcing cache quantization after
 the 8-chunk warmup while staying much smaller than the 180-frame script.
+
+## 2026-07-27 - Tiled HQMQ Fake Similarity Fix
+
+Task: fix the H200 smoke OOM in `FakeHQMQCacheAdapter._quantize_padded()` while
+preserving exact fake-HQMQ outputs versus the previous dense implementation on
+small tensors.
+
+Result:
+
+- Added `hqmq_max_sim_elements` to `QuantizeConfig`, defaulting to
+  `268,435,456` similarity elements.
+- Replaced the all-at-once `sims = einsum(... full codebook ...)` path with
+  sequence-token and codeword tiling in `_nearest_joint_directions()`.
+- Preserved dense argmax tie behavior by scanning codewords in order and only
+  replacing the current best score on strict improvement.
+- Recorded `sim_tile_tokens`, `sim_codeword_tile`, `sim_tile_count`,
+  `max_sim_tile_elements`, and `dense_sim_elements` in fake-HQMQ diagnostics.
+
+Validation before Slurm:
+
+```bash
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_hqmq_fake.py
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/visionreward/bin/python tests/test_hqmq_fake.py
+python3 -m py_compile quant_videogen/hqmq_fake.py \
+  quant_videogen/sim/quant/quantize_config.py tests/test_hqmq_fake.py \
+  experiments/Self-Forcing/inference.py \
+  experiments/Self-Forcing/pipeline/causal_inference.py
+bash -n scripts/Self-Forcing/smoke_hqmq_fake.sbatch
+git diff --check
+```
+
+All passed.

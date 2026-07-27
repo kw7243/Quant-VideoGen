@@ -64,3 +64,6 @@ class QuantizeConfig:
 
     hqmq_median_mult: float | None = None
     """Median-multiplier outlier restore threshold; hqmq-fake-med3x defaults to 3.0."""
+
+    hqmq_max_sim_elements: int = 268_435_456
+    """Maximum temporary similarity elements materialized by hqmq-fake."""
