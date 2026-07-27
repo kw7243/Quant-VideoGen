@@ -8,7 +8,6 @@ import torch
 
 from .compress import get_quantize_type, QuantizeFunctions
 from .sim.quant.quantize_config import QuantizeConfig
-from .functions import triton_prq_dequantize_tensor
 
 
 ########################################################
@@ -56,6 +55,8 @@ def uncompress_kv_cache(
     num_bits = extract_num_bits(quant_config)
 
     if quantize_type in (QuantizeFunctions.TRITON_PRQ, QuantizeFunctions.TRITON_PRQ_CLIP):
+        from .functions import triton_prq_dequantize_tensor
+
         k_tensor = triton_prq_dequantize_tensor(
             k_cache,
             quant_config.quant_block_size,

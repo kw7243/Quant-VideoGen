@@ -31,6 +31,26 @@ class QuantizeConfig:
     asymmetric spans the full [0, 2**n - 1] range at the cost of storing a zero
     point next to each scale."""
 
+    # HQMQ fake-quant adapter parameters. These are ignored by existing QVG
+    # methods and do not imply packed-cache memory savings.
+    hqmq_secondary_size: int = 96
+    """Secondary quaternion codebook size for hqmq-fake."""
+
+    hqmq_radius_bits: int = 4
+    """Scalar radius quantization bits for hqmq-fake."""
+
+    hqmq_seed: int = 42
+    """Seed for deterministic fake HQMQ secondary codebooks."""
+
+    hqmq_pad_head_dim: bool = True
+    """Pad non-multiple-of-4 head dimensions before HQMQ fake quantization."""
+
+    hqmq_log_radius: bool = False
+    """Use log-spaced radius quantization for hqmq-fake."""
+
+    hqmq_median_mult: float | None = None
+    """Median-multiplier outlier restore threshold; hqmq-fake-med3x defaults to 3.0."""
+
     # ---- Chunk-level quantization policy (see experiments/LingBot-v2) ----
     quant_factor: int = 8
     """Quantize the previous `quant_factor` chunks once every `quant_factor`
