@@ -10,6 +10,7 @@ from .sim.quant.lowbit_quantize import (
     blockwise_int2_quantize_triton,
 )
 from .sim.quant.quantize_config import QuantizeConfig
+from .hqmq_fake import FakeHQMQCacheAdapter, HQMQ_FAKE_TYPES
 
 from .functions import (
     kmeans_quantize_tensor,
@@ -30,9 +31,13 @@ class QuantizeFunctions(Enum):
     NSTAGE_KMEANS_CLIP = "prq_clip"
     TRITON_PRQ = "triton_prq"
     TRITON_PRQ_CLIP = "triton_prq_clip"
+    HQMQ_FAKE = "hqmq_fake"
 
 
 def get_quantize_fn(quant_type: str, quant_config: QuantizeConfig):
+    if quant_type in HQMQ_FAKE_TYPES:
+        return FakeHQMQCacheAdapter.from_quant_config(quant_type, quant_config)
+
     if quant_type in ["naive-fp4", "kmeans-fp4", "nstages-kmeans-fp4", "nstages-kmeans-fp4-clip"]:
         def quantize_fn(x):
             """Quantization function - replace this to use different methods."""
@@ -125,7 +130,9 @@ def get_quantize_type(quant_type: str):
     # ==========================================================
     # Determine preprocessing mode
     # ==========================================================
-    if quant_type in [
+    if quant_type in HQMQ_FAKE_TYPES:
+        quantize_type = QuantizeFunctions.HQMQ_FAKE
+    elif quant_type in [
         "kmeans-fp4",
         "kmeans-fp4-clip",
         "kmeans-int4",
@@ -168,10 +175,24 @@ def get_quantize_type(quant_type: str):
     return quantize_type
 
 
-def compress_kv_cache(k: torch.Tensor, v: torch.Tensor, quant_type: str, quant_config: QuantizeConfig, quantize_fn: callable):
+def compress_kv_cache(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    quant_type: str,
+    quant_config: QuantizeConfig,
+    quantize_fn: callable,
+    layer_idx: int = 0,
+):
     quantize_type = get_quantize_type(quant_type)
 
-    if quantize_type == QuantizeFunctions.NSTAGE_KMEANS:
+    if quantize_type == QuantizeFunctions.HQMQ_FAKE:
+        if not isinstance(quantize_fn, FakeHQMQCacheAdapter):
+            raise TypeError(
+                f"{quant_type} requires FakeHQMQCacheAdapter from get_quantize_fn, "
+                f"got {type(quantize_fn)!r}"
+            )
+        k_quant, v_quant = quantize_fn.quantize_pair(k, v, layer_idx=layer_idx)
+    elif quantize_type == QuantizeFunctions.NSTAGE_KMEANS:
         # Apply PRQ (multi-stage K-Means) based quantization
         k_quant = prq_quantize_tensor(
             k,

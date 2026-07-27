@@ -104,7 +104,12 @@ class CausalInferencePipeline(torch.nn.Module):
                 v = v.permute(0, 2, 1, 3).contiguous()
 
                 k_quant, v_quant = compress_kv_cache(
-                    k, v, self.quant_config.quant_type, self.quant_config, quantize_fn
+                    k,
+                    v,
+                    self.quant_config.quant_type,
+                    self.quant_config,
+                    quantize_fn,
+                    layer_idx=layer_idx,
                 )
 
                 self._print_kv_cache_mse_error(k, k_quant, v, v_quant, layer_idx)
