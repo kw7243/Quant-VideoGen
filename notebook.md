@@ -332,3 +332,91 @@ torchrun --nproc_per_node=1 --standalone experiments/Self-Forcing/inference.py \
   --quant_block_size 64 \
   --num_prq_stages 1
 ```
+
+## 2026-07-27 - HQMQ Fake Tensor Smoke And Model-Run Gate
+
+Task: run the cheapest useful validation of the fake HQMQ cache adapter in the
+scratch checkout:
+
+```text
+/data/scratch-fast/kwen1/quant-videogen
+```
+
+Repo state at inspection:
+
+```text
+d088f42ebb4e828b5380fd5ae4327edfb7c66b99 Add fake HQMQ cache adapter
+main...origin/main [ahead 2, behind 7]
+```
+
+No fetch, rebase, or merge was run.
+
+Environment inventory:
+
+- `/usr/bin/python3`: Python 3.10.12, no `torch`.
+- `/data/scratch-fast/kwen1/venvs/causal_forcing/bin/python`: Python 3.10.12,
+  no `torch`.
+- `/data/scratch-fast/kwen1/eval_envs/vbench/bin/python`: Python 3.10.20,
+  `torch 2.5.1+cu121`, `triton 3.1.0`, but Quant-VideoGen import fails in the
+  eager Triton PRQ path with `ValueError: 'N' is not in list`.
+- `/data/scratch-fast/kwen1/eval_envs/visionreward/bin/python`: Python 3.10.20,
+  `torch 2.1.0+cu121`, `triton 2.1.0`, but Quant-VideoGen import fails with
+  `ImportError: cannot import name 'libdevice' from 'triton.language.extra'`.
+- `/data/scratch-fast/kwen1/hqmq/.venv/bin/python`: Python 3.11.15,
+  `torch 2.10.0+cu128`, `triton 3.6.0`, but the unshimmed repo import lacks
+  pure-Python helpers `termcolor` and `loguru`.
+
+Required tensor smoke:
+
+```bash
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_hqmq_fake.py
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/visionreward/bin/python tests/test_hqmq_fake.py
+PYTHONPATH=. /data/scratch-fast/kwen1/hqmq/.venv/bin/python tests/test_hqmq_fake.py
+```
+
+All unshimmed attempts failed before reaching the adapter because of the
+environment/import issues above.
+
+The tensor smoke passed under the existing HQMQ venv after in-memory shims for
+only `termcolor` and `loguru`; no files or packages were modified. Diagnostic
+results from the same run:
+
+- shape preserved: `True`.
+- dtype preserved: `torch.float32` for K and V.
+- finite outputs: `True`.
+- base `hqmq-fake` relative L2: K `0.2251185178756714`, V
+  `0.25770625472068787`.
+- padded head dims for the non-multiple-of-4 test: `[12, 12]`.
+- deterministic for fixed seed: K `True`, V `True`.
+- `hqmq-fake-med3x` outlier rates: K `0.0833333358168602`, V `0.0`.
+
+Static validation:
+
+```bash
+/usr/bin/python3 -m py_compile quant_videogen/hqmq_fake.py quant_videogen/compress.py \
+  quant_videogen/uncompress.py quant_videogen/sim/quant/quantize_config.py \
+  tests/test_hqmq_fake.py experiments/LongCat/run_long_t2v.py \
+  experiments/LongCat/longcat_video/modules/longcat_video_dit.py \
+  experiments/Self-Forcing/inference.py \
+  experiments/Self-Forcing/pipeline/causal_inference.py \
+  experiments/HY-WorldPlay/wan/generate.py \
+  experiments/HY-WorldPlay/wan/inference/pipeline_wan_w_mem_relative_rope.py \
+  experiments/LingBot/generate_fast.py experiments/LingBot/wan/image2video_fast.py
+git diff --check
+```
+
+Both commands passed.
+
+Model-run gate:
+
+- `assets/t2v.txt` exists.
+- `ckpts/` is absent in this checkout.
+- `ckpts/Self-Forcing/self_forcing_dmd.pt` was not found.
+- A 17 GB Wan2.1-T2V-1.3B tree exists at
+  `/data/scratch-fast/kwen1/Causal-Forcing/wan_models/Wan2.1-T2V-1.3B`, but the
+  Self-Forcing script expects `ckpts/Self-Forcing/Wan2.1-T2V-1.3B`.
+
+Decision: do not stage or submit a Slurm model smoke. The next branch is to
+provide or approve locating/linking the Self-Forcing DMD checkpoint and a
+complete Self-Forcing runtime environment, then run the smallest staged
+one-prompt fake-cache job through Slurm.
