@@ -181,7 +181,8 @@ def _parse_args():
         type=str,
         default="none",
         help="KV cache quantization type. 'none' disables quantization. "
-             "Examples: triton-nstages-kmeans-int2, triton-nstages-kmeans-int4. "
+             "Examples: triton-nstages-kmeans-int2, triton-nstages-kmeans-int4, "
+             "hqmq-fake, hqmq-fake-med3x. "
              "Requires --use_chunked_kv.")
     parser.add_argument(
         "--cache_num_k_centroids", type=int, default=256)

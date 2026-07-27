@@ -11,7 +11,12 @@ while keeping the data in higher precision formats (bf16/fp32).
 import torch
 import triton
 import triton.language as tl
-from termcolor import cprint
+try:
+    from termcolor import cprint
+except ModuleNotFoundError:
+    def cprint(text, color=None, on_color=None, attrs=None, **kwargs):
+        print_kwargs = {key: kwargs[key] for key in ("sep", "end", "file", "flush") if key in kwargs}
+        print(text, **print_kwargs)
 from triton.language.extra import libdevice
 from typing import Optional, Tuple
 

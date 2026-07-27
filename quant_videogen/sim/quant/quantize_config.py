@@ -44,3 +44,23 @@ class QuantizeConfig:
     """Leading attention-sink chunks never quantized. The first sink chunk holds
     the initial conditioning frame that every later chunk attends to, so
     quantization error there never decays; 1 is recommended."""
+
+    # HQMQ fake-quant adapter parameters. These are ignored by existing QVG
+    # methods and do not imply packed-cache memory savings.
+    hqmq_secondary_size: int = 96
+    """Secondary quaternion codebook size for hqmq-fake."""
+
+    hqmq_radius_bits: int = 4
+    """Scalar radius quantization bits for hqmq-fake."""
+
+    hqmq_seed: int = 42
+    """Seed for deterministic fake HQMQ secondary codebooks."""
+
+    hqmq_pad_head_dim: bool = True
+    """Pad non-multiple-of-4 head dimensions before HQMQ fake quantization."""
+
+    hqmq_log_radius: bool = False
+    """Use log-spaced radius quantization for hqmq-fake."""
+
+    hqmq_median_mult: float | None = None
+    """Median-multiplier outlier restore threshold; hqmq-fake-med3x defaults to 3.0."""

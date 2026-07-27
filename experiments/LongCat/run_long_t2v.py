@@ -776,6 +776,8 @@ def _parse_args():
             "triton-nstages-kmeans-int2-clip",
             "triton-nstages-kmeans-int4",
             "triton-nstages-kmeans-int4-clip",
+            "hqmq-fake",
+            "hqmq-fake-med3x",
         ],
         help="Quantization type for the model",
     )

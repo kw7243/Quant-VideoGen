@@ -571,7 +571,12 @@ class LongCatVideoTransformer3DModel(ModelMixin, ConfigMixin):
                     k, v = _onload_kv_cache((k, v), "cuda")
 
                 k_quant, v_quant = compress_kv_cache(
-                    k, v, self.quant_config.quant_type, self.quant_config, quantize_fn
+                    k,
+                    v,
+                    self.quant_config.quant_type,
+                    self.quant_config,
+                    quantize_fn,
+                    layer_idx=layer_idx,
                 )
 
                 k_quant, v_quant = self._pack_info_into_kv_cache(k_quant, v_quant, k.dtype)

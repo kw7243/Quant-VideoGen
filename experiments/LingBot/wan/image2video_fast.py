@@ -760,7 +760,14 @@ class WanI2VFast:
                 # ChunkedKVCache stores BSHD; compress_kv_cache wants BHSD.
                 k = k_cache.read(tokens_to_quantize_start, tokens_to_quantize_end).permute(0, 2, 1, 3).contiguous()
                 v = v_cache.read(tokens_to_quantize_start, tokens_to_quantize_end).permute(0, 2, 1, 3).contiguous()
-                k_quant, v_quant = compress_kv_cache(k, v, quant_config.quant_type, quant_config, quantize_fn)
+                k_quant, v_quant = compress_kv_cache(
+                    k,
+                    v,
+                    quant_config.quant_type,
+                    quant_config,
+                    quantize_fn,
+                    layer_idx=layer_idx,
+                )
                 # Pack info so .read() can decompress on the fly.
                 if isinstance(k_quant, dict) and isinstance(v_quant, dict):
                     info = {"output_dtype": k.dtype, "quant_config": quant_config}
