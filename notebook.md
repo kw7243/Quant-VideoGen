@@ -418,3 +418,15 @@ git diff --check
 ```
 
 All passed.
+
+Fresh H200-only smoke submission:
+
+- Fix commit staged: `6de8c1cbc421dee81ef7a1e5c2e9598baf646234`.
+- Staged path:
+  `/data/scratch-fast/kwen1/qvg-staging/20260727_182815-ee78fa-6de8c1c-code`.
+- Slurm job id: `1211191`.
+- Partition/QoS: `vision-torralba-h200` /
+  `vision-torralba-urops-meng`.
+- Status at notebook update: `PENDING`, reason `(Priority)`.
+- Output scout will be
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1211191`.
