@@ -254,3 +254,81 @@ Interpretation:
 - Separate theoretical bits from measured memory.
 - Use paired runs for BF16/QVG/HQMQ comparisons.
 - Use Slurm for future GPU jobs, but this planning task submitted no Slurm jobs.
+
+## 2026-07-27 - Fake HQMQ Cache Adapter
+
+Implemented an optional fake-HQMQ path behind Quant-VideoGen's existing
+`compress_kv_cache` boundary. The new public method names are:
+
+```text
+hqmq-fake
+hqmq-fake-med3x
+```
+
+Files changed for the adapter:
+
+- `quant_videogen/hqmq_fake.py`: local pure-PyTorch fake adapter. It mirrors
+  the read-only HQMQ fake-quant contract for BHSD K/V tensors, uses 4-value
+  quaternion chunks, fixed 24-cell primary directions, deterministic per-layer
+  per-head K/V secondary codebooks, scalar radius quantization, optional
+  padding for non-multiple-of-4 head dimensions, and optional Med3x outlier
+  restoration.
+- `quant_videogen/compress.py`: dispatches `hqmq-fake` and
+  `hqmq-fake-med3x` through `FakeHQMQCacheAdapter`.
+- `quant_videogen/sim/quant/quantize_config.py`: records HQMQ fake defaults
+  without changing existing QVG method defaults.
+- Integration call sites now pass `layer_idx` into `compress_kv_cache` where
+  they already have it: LongCat, Self-Forcing, HY-WorldPlay, and LingBot.
+- `tests/test_hqmq_fake.py`: CPU-only smoke test for fake HQMQ tensor shape,
+  dtype, determinism, finite diagnostics, and existing dispatch categories.
+
+Validation:
+
+```text
+python3 -m py_compile quant_videogen/hqmq_fake.py quant_videogen/compress.py \
+  quant_videogen/uncompress.py quant_videogen/sim/quant/quantize_config.py \
+  tests/test_hqmq_fake.py
+```
+
+passed.
+
+The runnable tensor smoke test could not run in the available shell because
+both `/usr/bin/python3` and `/data/scratch-fast/kwen1/venvs/causal_forcing/bin/python`
+raise `ModuleNotFoundError: No module named 'torch'`. No dependencies were
+installed for this task.
+
+Remaining transfer risks:
+
+- This is fake quant only. It returns dense tensors and does not provide packed
+  HQMQ memory or latency savings.
+- HQMQ remains an LLM KV-cache method until video quality and attention-output
+  distortion are measured on real video-generator caches.
+- Video K/V may have timestep, layer, head, rope/prope channel, temporal, and
+  conditioning-specific failure modes that language-model runs do not expose.
+- Med3x outlier restoration is clearly separated as `hqmq-fake-med3x`; its
+  outlier rate must be measured on video caches before treating it as useful.
+
+Do not launch this from the implementation task, but the smallest next
+fake-quant cache-dump experiment is:
+
+```bash
+export PYTHONPATH=experiments/Self-Forcing:.
+KV_DUMP_DIR=results/selfforcing/hqmq-fake_cache_dump/kv_dumps \
+DUMP_KV_LEVEL=1 \
+torchrun --nproc_per_node=1 --standalone experiments/Self-Forcing/inference.py \
+  --config_path experiments/Self-Forcing/configs/self_forcing_dmd.yaml \
+  --checkpoint_path ckpts/Self-Forcing/self_forcing_dmd.pt \
+  --data_path assets/t2v.txt \
+  --output_folder results/selfforcing/hqmq-fake_cache_dump \
+  --num_samples 1 \
+  --num_output_frames 180 \
+  --local_attn_size 180 \
+  --use_ema \
+  --save_with_index \
+  --quant_type hqmq-fake \
+  --cache_num_k_centroids 256 \
+  --cache_num_v_centroids 256 \
+  --kmeans_max_iters 2 \
+  --quant_block_size 64 \
+  --num_prq_stages 1
+```

@@ -410,7 +410,12 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     cprint(f"K shape: {k.shape} | V shape: {v.shape}", "magenta")
 
                 k_quant, v_quant = compress_kv_cache(
-                    k, v, quant_config.quant_type, quant_config, quantize_fn
+                    k,
+                    v,
+                    quant_config.quant_type,
+                    quant_config,
+                    quantize_fn,
+                    layer_idx=layer_idx,
                 )
 
                 self._print_kv_cache_mse_error(k, k_quant, v, v_quant, layer_idx)
