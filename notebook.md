@@ -430,3 +430,21 @@ Fresh H200-only smoke submission:
 - Status at notebook update: `PENDING`, reason `(Priority)`.
 - Output scout will be
   `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1211191`.
+
+Terminal result for job `1211191`:
+
+- State: `FAILED`, exit code `1:0`, elapsed `00:01:43`, node
+  `torralba-h200-1`.
+- The run reached `hqmq-fake` after the tiling fix. It printed
+  `Layer 00 | K Rel L2: 0.1289 | V Rel L2: 0.1270`.
+- New failure: `ChunkedKVCache.write()` asserted
+  `end_index - start_index (37440) != data tokens (12)`.
+- Root cause: Self-Forcing reads BSHD cache tensors, permutes to BHSD for
+  `compress_kv_cache()`, receives dense fake-HQMQ tensors in BHSD, then stores
+  them into a BSHD `ChunkedKVCache` without permuting back to BSHD.
+- Output scout
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1211191`
+  contains only an empty `kv_dumps/` directory and no valid smoke artifacts.
+- Next smallest fix: in Self-Forcing `quantize_kv_cache()`, permute dense tensor
+  fake-quant outputs back to cache-native BSHD before `store_quantized()`, while
+  leaving dict/real-quantized outputs in the packed BHSD schema.
