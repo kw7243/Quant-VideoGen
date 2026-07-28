@@ -491,3 +491,21 @@ All local validation passed. Asset symlinks for
 `ckpts/Self-Forcing/Wan2.1-T2V-1.3B`,
 `ckpts/Self-Forcing/self_forcing_dmd.pt`, and `assets/t2v.txt` resolved from the
 source checkout.
+
+Staged H200-only smoke submission:
+
+- Code fix commit staged: `d4412343ab1378895ca01dbdd6c6d83f0934d25c`.
+- Staged path:
+  `/data/scratch-fast/kwen1/qvg-staging/20260727_221003-c2cba7-d441234-code`.
+- Slurm job id: `1213946`.
+- Partition/QoS: `vision-torralba-h200` /
+  `vision-torralba-urops-meng`.
+- Status after foreground polling through `2026-07-27 22:15:43` local machine
+  time: `PENDING`, reason `(Priority)`, no node assigned.
+- Logs will be
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-logs/qvg_sf_hqmq_smoke-1213946.out`
+  and
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-logs/qvg_sf_hqmq_smoke-1213946.err`
+  after the job starts.
+- Output scout will be
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1213946`.
