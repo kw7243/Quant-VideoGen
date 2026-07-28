@@ -119,6 +119,13 @@ class CausalInferencePipeline(torch.nn.Module):
                     k_quant, v_quant = self._pack_info_into_kv_cache(
                         k_quant, v_quant, k.dtype
                     )
+                elif isinstance(k_quant, torch.Tensor) and isinstance(v_quant, torch.Tensor):
+                    k_quant = self._dense_quant_tensor_to_cache_layout(
+                        k_quant, layer["k"]
+                    )
+                    v_quant = self._dense_quant_tensor_to_cache_layout(
+                        v_quant, layer["v"]
+                    )
 
                 # store_quantized handles both tensor (fake) and dict (real)
                 layer["k"].store_quantized(
@@ -188,6 +195,15 @@ class CausalInferencePipeline(torch.nn.Module):
                 "quant_config": self.quant_config,
             }
         return k_cache, v_cache
+
+    @staticmethod
+    def _dense_quant_tensor_to_cache_layout(quant_data: torch.Tensor, cache: ChunkedKVCache):
+        """Convert dense BHSD fake-quant output to the cache's native layout."""
+        if cache.layout == "BSHD":
+            return quant_data.permute(0, 2, 1, 3).contiguous()
+        if cache.layout == "BHSD":
+            return quant_data.contiguous()
+        raise ValueError(f"Unsupported KV cache layout: {cache.layout}")
     
 
     def inference(

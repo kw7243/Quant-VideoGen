@@ -448,3 +448,46 @@ Terminal result for job `1211191`:
 - Next smallest fix: in Self-Forcing `quantize_kv_cache()`, permute dense tensor
   fake-quant outputs back to cache-native BSHD before `store_quantized()`, while
   leaving dict/real-quantized outputs in the packed BHSD schema.
+
+## 2026-07-28 - Self-Forcing HQMQ Dense Layout Handoff Fix
+
+Task: fix the BSHD/BHSD handoff that made H200 smoke job `1211191` fail after
+the first layer fake-HQMQ diagnostics.
+
+Result:
+
+- Confirmed the diagnosis from the failed smoke logs: Self-Forcing reads native
+  BSHD cache spans, permutes them to BHSD for `compress_kv_cache()`, receives
+  dense fake-HQMQ BHSD tensors, then must permute those dense tensors back to
+  the cache layout before `store_quantized()`.
+- Added the Self-Forcing handoff conversion for dense tensor outputs only.
+  Packed dict outputs are still stored unchanged through the existing real-quant
+  metadata path.
+- Added a CPU regression that imports the layout helper with lightweight stubs
+  and verifies dense fake-HQMQ BHSD output is converted before storing into a
+  BSHD `ChunkedKVCache`.
+
+Local validation before Slurm:
+
+```bash
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_hqmq_fake.py
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/visionreward/bin/python tests/test_hqmq_fake.py
+python3 -m py_compile quant_videogen/logger.py quant_videogen/hqmq_fake.py \
+  quant_videogen/compress.py quant_videogen/uncompress.py \
+  quant_videogen/sim/quant/lowbit_quantize.py \
+  quant_videogen/sim/quant/quantize_config.py tests/test_hqmq_fake.py \
+  experiments/LongCat/run_long_t2v.py \
+  experiments/LongCat/longcat_video/modules/longcat_video_dit.py \
+  experiments/Self-Forcing/inference.py \
+  experiments/Self-Forcing/pipeline/causal_inference.py \
+  experiments/HY-WorldPlay/wan/generate.py \
+  experiments/HY-WorldPlay/wan/inference/pipeline_wan_w_mem_relative_rope.py \
+  experiments/LingBot/generate_fast.py experiments/LingBot/wan/image2video_fast.py
+bash -n scripts/Self-Forcing/smoke_hqmq_fake.sbatch
+git diff --check
+```
+
+All local validation passed. Asset symlinks for
+`ckpts/Self-Forcing/Wan2.1-T2V-1.3B`,
+`ckpts/Self-Forcing/self_forcing_dmd.pt`, and `assets/t2v.txt` resolved from the
+source checkout.

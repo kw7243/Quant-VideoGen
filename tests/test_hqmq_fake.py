@@ -1,4 +1,8 @@
 import math
+import importlib.util
+from pathlib import Path
+import sys
+import types
 
 import torch
 
@@ -9,6 +13,7 @@ from quant_videogen.compress import (
     get_quantize_type,
 )
 from quant_videogen.hqmq_fake import FakeHQMQCacheAdapter
+from quant_videogen.kv_cache import ChunkedKVCache
 from quant_videogen.sim.quant.quantize_config import QuantizeConfig
 from quant_videogen.uncompress import uncompress_kv_cache
 
@@ -49,6 +54,65 @@ def _dense_quantize_padded_reference(
     direction_quant = joint_expanded.gather(dim=-2, index=gather_idx).squeeze(-2)
     radius_quant = adapter._quantize_radius(radius)
     return (radius_quant * direction_quant).reshape(bsz, heads, seq_len, head_dim)
+
+
+def _load_self_forcing_causal_inference_module():
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "experiments"
+        / "Self-Forcing"
+        / "pipeline"
+        / "causal_inference.py"
+    )
+
+    previous_modules = {}
+    stub_names = [
+        "utils",
+        "utils.wan_wrapper",
+        "demo_utils",
+        "demo_utils.memory",
+        "termcolor",
+    ]
+    for name in stub_names:
+        previous_modules[name] = sys.modules.get(name)
+
+    utils_module = types.ModuleType("utils")
+    wan_wrapper_module = types.ModuleType("utils.wan_wrapper")
+    wan_wrapper_module.WanDiffusionWrapper = object
+    wan_wrapper_module.WanTextEncoder = object
+    wan_wrapper_module.WanVAEWrapper = object
+
+    demo_utils_module = types.ModuleType("demo_utils")
+    memory_module = types.ModuleType("demo_utils.memory")
+    memory_module.gpu = None
+    memory_module.get_cuda_free_memory_gb = lambda *_args, **_kwargs: 0
+    memory_module.DynamicSwapInstaller = object
+    memory_module.move_model_to_device_with_memory_preservation = (
+        lambda *_args, **_kwargs: None
+    )
+    termcolor_module = types.ModuleType("termcolor")
+    termcolor_module.cprint = lambda *args, **_kwargs: print(*args)
+
+    sys.modules["utils"] = utils_module
+    sys.modules["utils.wan_wrapper"] = wan_wrapper_module
+    sys.modules["demo_utils"] = demo_utils_module
+    sys.modules["demo_utils.memory"] = memory_module
+    sys.modules["termcolor"] = termcolor_module
+
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "self_forcing_causal_inference_for_test", module_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for name, previous in previous_modules.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
 
 def test_hqmq_fake_round_trip_shape_dtype_and_diagnostics():
@@ -140,6 +204,54 @@ def test_hqmq_fake_diagnostics_record_bounded_tiles():
         assert diagnostic["dense_sim_elements"] > config.hqmq_max_sim_elements
 
 
+def test_self_forcing_dense_hqmq_output_is_permuted_for_bshd_cache():
+    torch.manual_seed(5)
+    config = _small_config("hqmq-fake")
+    adapter = get_quantize_fn(config.quant_type, config)
+    source_bshd = torch.randn(1, 6, 2, 8, dtype=torch.float32)
+
+    source_bhsd = source_bshd.permute(0, 2, 1, 3).contiguous()
+    dense_quant_bhsd, _ = compress_kv_cache(
+        source_bhsd,
+        source_bhsd,
+        config.quant_type,
+        config,
+        adapter,
+        layer_idx=0,
+    )
+
+    cache = ChunkedKVCache(
+        batch_size=1,
+        frame_seq_length=3,
+        num_heads=2,
+        head_dim=8,
+        max_num_chunks=2,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+        layout="BSHD",
+    )
+
+    try:
+        cache.store_quantized(0, 6, dense_quant_bhsd)
+    except AssertionError as exc:
+        assert "data tokens (2)" in str(exc)
+    else:
+        raise AssertionError("BHSD tensor unexpectedly stored directly in BSHD cache")
+
+    causal_inference = _load_self_forcing_causal_inference_module()
+    dense_quant_bshd = (
+        causal_inference.CausalInferencePipeline
+        ._dense_quant_tensor_to_cache_layout(dense_quant_bhsd, cache)
+    )
+
+    cache.store_quantized(0, 6, dense_quant_bshd)
+    assert torch.equal(cache.read(0, 6), dense_quant_bshd)
+    assert torch.equal(
+        dense_quant_bshd,
+        dense_quant_bhsd.permute(0, 2, 1, 3).contiguous(),
+    )
+
+
 def test_existing_qvg_dispatch_names_still_classify():
     expected = {
         "naive-int4": QuantizeFunctions.NAIVE,
@@ -163,4 +275,5 @@ if __name__ == "__main__":
     test_hqmq_fake_med3x_records_outlier_rate()
     test_hqmq_fake_tiled_matches_dense_reference()
     test_hqmq_fake_diagnostics_record_bounded_tiles()
+    test_self_forcing_dense_hqmq_output_is_permuted_for_bshd_cache()
     test_existing_qvg_dispatch_names_still_classify()
