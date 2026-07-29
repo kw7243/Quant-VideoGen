@@ -580,3 +580,62 @@ Submission outcome:
   above, then inspect `hqmq_fake_med3x_27f_prompt1_<jobid>` logs for
   `HQMQ Fake Diagnostics`, outlier rates, effective bits per value, memory
   estimate, H200 VRAM, host memory, and MP4/KV dump outputs.
+
+## 2026-07-29 - Self-Forcing Med3x Staged Smoke Submitted
+
+Task: resume the blocked one-prompt `hqmq-fake-med3x` follow-up after
+Kerberos/AFS tokens were restored.
+
+Pre-submit checks:
+
+- AFS/Kerberos credentials were present and the staging helper was executable.
+- Source branch was `fm/qvg-self-forcing-review-next-smoke` at
+  `ebe7c9f1ca3e6031f977197dfc6ca809f9eed2c0`, with clean git status.
+- Current shell was on CPU allocation `1226987` with no direct GPU visibility,
+  as expected for the login/setup context.
+- Target partition `vision-torralba-h200` was UP with `torralba-h200-1` exposing
+  `gpu:h200:8`, `RealMemory=2063711M`, and `FreeMem=1923610M`.
+- Account/QoS check showed `vision-torralba-urops-meng` with QoS
+  `vision-torralba-urops-meng`.
+- Static memory estimate for `NUM_OUTPUT_FRAMES=27`,
+  `LOCAL_ATTN_SIZE=27`, `QUANT_TYPE=hqmq-fake-med3x`, `PROMPT_LIMIT=1`:
+  estimated KV cache 7,403.94 MB, estimated peak VRAM 29,323.85 MB, and
+  25% margin 36,654.81 MB against prior H200 143,771 MiB total VRAM and
+  96G host memory request.
+
+Staged submission:
+
+```bash
+/afs/csail.mit.edu/u/k/kwen1/.codex/skills/research-reproducibility/scripts/stage_and_run.sh \
+  --staging-parent /data/scratch-fast/kwen1/qvg-staging \
+  -- env QUANT_TYPE=hqmq-fake-med3x PROMPT_LIMIT=1 \
+    RUN_LABEL_PREFIX=hqmq_fake_med3x_27f_prompt1 \
+    NUM_OUTPUT_FRAMES=27 LOCAL_ATTN_SIZE=27 NUM_SAMPLES=1 DUMP_KV_LEVEL=1 \
+    sbatch scripts/Self-Forcing/smoke_hqmq_fake.sbatch
+```
+
+- Staged path:
+  `/data/scratch-fast/kwen1/qvg-staging/20260729_002945-1402d8-ebe7c9f-code`.
+- Staged metadata commit:
+  `ebe7c9f1ca3e6031f977197dfc6ca809f9eed2c0`.
+- Slurm job id: `1227740`.
+- Output path after the job starts:
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_med3x_27f_prompt1_1227740`.
+- Logs after the job starts:
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-logs/qvg_sf_hqmq_smoke-1227740.out`
+  and
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-logs/qvg_sf_hqmq_smoke-1227740.err`.
+
+Monitoring outcome at `2026-07-29 00:40:47 EDT`:
+
+- Job state: `PENDING`, reason `Resources`.
+- Scheduled node list: `torralba-h200-1`.
+- `squeue --start` estimated start:
+  `2026-07-30T17:20:09`.
+- The H200 node was occupied by another `gres/gpu:8` job, so no terminal GPU
+  outcome exists yet.
+
+Next check: wait for job `1227740` to start/finish, then inspect the logs for
+`SMOKE_CONFIG`, `memory_estimate`, H200 VRAM/CUDA evidence,
+`HQMQ Fake Diagnostics`, quantization times, peak/KV memory, output MP4 media
+metadata, contact sheet, and KV dump metadata.
