@@ -509,3 +509,50 @@ Staged H200-only smoke submission:
   after the job starts.
 - Output scout will be
   `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1213946`.
+
+## 2026-07-28 - Self-Forcing Fake-HQMQ Output Review And Med3x Follow-Up
+
+Task: review completed tiny fake-HQMQ Self-Forcing outputs from H200 job
+`1213946` and decide the next bounded smoke.
+
+Existing output review:
+
+- `0-0_ema.mp4`: H.264, 832x480, 16 fps, 105 frames, 6.5625 s, 853,175 bytes.
+- `1-0_ema.mp4`: H.264, 832x480, 16 fps, 105 frames, 6.5625 s, 803,257 bytes.
+- Contact sheets show nonblank prompt-matched outputs: skateboarder on mountain
+  road for prompt 0, papercraft coral reef/fish for prompt 1.
+- `kv_cache_frames27.pt` exists at 7,858,486,627 bytes. FakeTensor metadata
+  inspection found 30 BSHD `ChunkedKVCache` layers with bf16 chunks and
+  30 cross-attention cache layers.
+- Job log evidence: H200 startup showed 0 MiB / 143,771 MiB used and Python
+  free VRAM 139.29 GB. Quantization times were 5.70 s and 5.55 s; peak memory
+  was 20,973.79 MB and 29,327.10 MB; total KV cache memory was 6,581.87 MB and
+  7,403.94 MB. `sacct` batch MaxRSS was 59,732,868K against a 96G request.
+
+Decision: the outputs are plausible enough to continue, but the next run should
+remain small. The follow-up will keep 27 frames and one sample, limit the prompt
+file to one prompt to avoid a second 7.3G KV dump overwrite, and switch
+`QUANT_TYPE=hqmq-fake-med3x` to exercise the outlier-preserving fake-HQMQ path.
+
+Prepared instrumentation:
+
+- Parameterized `scripts/Self-Forcing/smoke_hqmq_fake.sbatch` for quant type,
+  frame count, local attention, prompt limit, dump level, and quant knobs.
+- Added Slurm-side preflight logging for host memory, output/cache filesystem,
+  H200 VRAM, CUDA visibility, and a static memory estimate derived from job
+  `1213946`.
+- Added compact Self-Forcing HQMQ fake diagnostics logging for effective bits,
+  outlier rate, tile sizes, tile count, max simulated tile elements, and finite
+  status.
+
+Validation before submission passed:
+
+```bash
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_hqmq_fake.py
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/visionreward/bin/python tests/test_hqmq_fake.py
+bash -n scripts/Self-Forcing/smoke_hqmq_fake.sbatch
+git diff --check
+python3 -m py_compile experiments/Self-Forcing/pipeline/causal_inference.py \
+  experiments/Self-Forcing/inference.py quant_videogen/hqmq_fake.py \
+  quant_videogen/compress.py tests/test_hqmq_fake.py
+```

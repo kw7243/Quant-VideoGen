@@ -113,6 +113,7 @@ class CausalInferencePipeline(torch.nn.Module):
                 )
 
                 self._print_kv_cache_mse_error(k, k_quant, v, v_quant, layer_idx)
+                self._print_hqmq_fake_diagnostics(quantize_fn, layer_idx)
 
                 # Pack decompression metadata for real-quantized dicts
                 if isinstance(k_quant, dict) and isinstance(v_quant, dict):
@@ -182,6 +183,32 @@ class CausalInferencePipeline(torch.nn.Module):
             f"Per Layer Memory Usage: {per_layer_memory_usage:.2f} MB | Total KV Cache Memory Usage: {total_kv_cache_memory_usage:.2f} MB",
             "light_blue",
         )
+
+    def _print_hqmq_fake_diagnostics(self, quantize_fn, layer_idx: int):
+        """Print compact diagnostics when the fake HQMQ adapter exposes them."""
+
+        diagnostics = getattr(quantize_fn, "last_diagnostics", None)
+        if not diagnostics:
+            return
+
+        for diagnostic in diagnostics:
+            tensor_name = diagnostic.get("tensor", "?")
+            outlier_rate = diagnostic.get("outlier_rate")
+            outlier_text = "none" if outlier_rate is None else f"{outlier_rate:.6f}"
+            effective_bpv = diagnostic.get("effective_bits_per_value")
+            effective_bpv_text = "unknown" if effective_bpv is None else f"{effective_bpv:.4f}"
+            cprint(
+                "HQMQ Fake Diagnostics | "
+                f"Layer {layer_idx:02d} {tensor_name.upper()} | "
+                f"effective_bits_per_value={effective_bpv_text} | "
+                f"outlier_rate={outlier_text} | "
+                f"sim_tile_tokens={diagnostic.get('sim_tile_tokens')} | "
+                f"sim_codeword_tile={diagnostic.get('sim_codeword_tile')} | "
+                f"sim_tile_count={diagnostic.get('sim_tile_count')} | "
+                f"max_sim_tile_elements={diagnostic.get('max_sim_tile_elements')} | "
+                f"finite={diagnostic.get('finite')}",
+                "light_blue",
+            )
 
     def _pack_info_into_kv_cache(self, k_cache, v_cache, output_dtype):
         """Pack metadata into KV cache. Only when the cached value is a real quantized dict."""
