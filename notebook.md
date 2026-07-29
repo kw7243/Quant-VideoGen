@@ -556,3 +556,27 @@ python3 -m py_compile experiments/Self-Forcing/pipeline/causal_inference.py \
   experiments/Self-Forcing/inference.py quant_videogen/hqmq_fake.py \
   quant_videogen/compress.py tests/test_hqmq_fake.py
 ```
+
+Submission outcome:
+
+- Intended staged command:
+
+```bash
+/afs/csail.mit.edu/u/k/kwen1/.codex/skills/research-reproducibility/scripts/stage_and_run.sh \
+  --staging-parent /data/scratch-fast/kwen1/qvg-staging \
+  -- env QUANT_TYPE=hqmq-fake-med3x PROMPT_LIMIT=1 \
+    RUN_LABEL_PREFIX=hqmq_fake_med3x_27f_prompt1 \
+    NUM_OUTPUT_FRAMES=27 LOCAL_ATTN_SIZE=27 NUM_SAMPLES=1 DUMP_KV_LEVEL=1 \
+    sbatch scripts/Self-Forcing/smoke_hqmq_fake.sbatch
+```
+
+- Direct invocation failed before staging or Slurm submission because the AFS
+  helper path was inaccessible: `Permission denied`.
+- `tokens` reported no AFS tokens, `klist` reported no Kerberos credential
+  cache, `aklog` failed non-interactively, and `kinit -R` could not renew
+  because there was no credentials cache.
+- No follow-up Slurm job was submitted from the source worktree.
+- Next step once credentials are restored: rerun the intended staged command
+  above, then inspect `hqmq_fake_med3x_27f_prompt1_<jobid>` logs for
+  `HQMQ Fake Diagnostics`, outlier rates, effective bits per value, memory
+  estimate, H200 VRAM, host memory, and MP4/KV dump outputs.
