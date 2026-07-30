@@ -102,5 +102,8 @@ all = [
     "quant-videogen[longcat,selfforcing,hyworldplay,lingbot]",
 ]
 
+[project.scripts]
+qvg-video-metrics = "quant_videogen.video_metrics:main"
+
 [tool.setuptools.packages.find]
 include = ["quant_videogen*"]

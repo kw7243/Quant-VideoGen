@@ -639,3 +639,27 @@ Next check: wait for job `1227740` to start/finish, then inspect the logs for
 `SMOKE_CONFIG`, `memory_estimate`, H200 VRAM/CUDA evidence,
 `HQMQ Fake Diagnostics`, quantization times, peak/KV memory, output MP4 media
 metadata, contact sheet, and KV dump metadata.
+
+## 2026-07-30 - Video Metrics Scaffold And Central Research Program
+
+Task: add a CPU-testable paired-video metrics scaffold for future
+video-generation cache-quantization experiments, aligned with the captain's
+broader research program rather than an HQMQ-only framing.
+
+Durable program document:
+
+```text
+docs/research-program.md
+```
+
+The metrics lane is scoped to Stage 0 infrastructure validation and Stage 3
+controlled rollout comparison:
+
+- Stage 0: inspect generated MP4 metadata and emit skip records for missing or
+  unreadable files.
+- Stage 3: pair BF16, QVG, HQMQ, or other candidate outputs by prompt/config/
+  seed/run label and compute paired PSNR, SSIM, and temporal-difference
+  consistency when videos are compatible.
+
+No Slurm jobs, model runs, codec implementation, dependency downloads, or
+changes outside this Quant-VideoGen checkout were performed.
