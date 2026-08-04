@@ -104,15 +104,28 @@ class CausalInferencePipeline(torch.nn.Module):
                 v = v.permute(0, 2, 1, 3).contiguous()
 
                 k_quant, v_quant = compress_kv_cache(
-                    k, v, self.quant_config.quant_type, self.quant_config, quantize_fn
+                    k,
+                    v,
+                    self.quant_config.quant_type,
+                    self.quant_config,
+                    quantize_fn,
+                    layer_idx=layer_idx,
                 )
 
                 self._print_kv_cache_mse_error(k, k_quant, v, v_quant, layer_idx)
+                self._print_hqmq_fake_diagnostics(quantize_fn, layer_idx)
 
                 # Pack decompression metadata for real-quantized dicts
                 if isinstance(k_quant, dict) and isinstance(v_quant, dict):
                     k_quant, v_quant = self._pack_info_into_kv_cache(
                         k_quant, v_quant, k.dtype
+                    )
+                elif isinstance(k_quant, torch.Tensor) and isinstance(v_quant, torch.Tensor):
+                    k_quant = self._dense_quant_tensor_to_cache_layout(
+                        k_quant, layer["k"]
+                    )
+                    v_quant = self._dense_quant_tensor_to_cache_layout(
+                        v_quant, layer["v"]
                     )
 
                 # store_quantized handles both tensor (fake) and dict (real)
@@ -171,6 +184,32 @@ class CausalInferencePipeline(torch.nn.Module):
             "light_blue",
         )
 
+    def _print_hqmq_fake_diagnostics(self, quantize_fn, layer_idx: int):
+        """Print compact diagnostics when the fake HQMQ adapter exposes them."""
+
+        diagnostics = getattr(quantize_fn, "last_diagnostics", None)
+        if not diagnostics:
+            return
+
+        for diagnostic in diagnostics:
+            tensor_name = diagnostic.get("tensor", "?")
+            outlier_rate = diagnostic.get("outlier_rate")
+            outlier_text = "none" if outlier_rate is None else f"{outlier_rate:.6f}"
+            effective_bpv = diagnostic.get("effective_bits_per_value")
+            effective_bpv_text = "unknown" if effective_bpv is None else f"{effective_bpv:.4f}"
+            cprint(
+                "HQMQ Fake Diagnostics | "
+                f"Layer {layer_idx:02d} {tensor_name.upper()} | "
+                f"effective_bits_per_value={effective_bpv_text} | "
+                f"outlier_rate={outlier_text} | "
+                f"sim_tile_tokens={diagnostic.get('sim_tile_tokens')} | "
+                f"sim_codeword_tile={diagnostic.get('sim_codeword_tile')} | "
+                f"sim_tile_count={diagnostic.get('sim_tile_count')} | "
+                f"max_sim_tile_elements={diagnostic.get('max_sim_tile_elements')} | "
+                f"finite={diagnostic.get('finite')}",
+                "light_blue",
+            )
+
     def _pack_info_into_kv_cache(self, k_cache, v_cache, output_dtype):
         """Pack metadata into KV cache. Only when the cached value is a real quantized dict."""
         if isinstance(k_cache, dict) and isinstance(v_cache, dict):
@@ -183,6 +222,15 @@ class CausalInferencePipeline(torch.nn.Module):
                 "quant_config": self.quant_config,
             }
         return k_cache, v_cache
+
+    @staticmethod
+    def _dense_quant_tensor_to_cache_layout(quant_data: torch.Tensor, cache: ChunkedKVCache):
+        """Convert dense BHSD fake-quant output to the cache's native layout."""
+        if cache.layout == "BSHD":
+            return quant_data.permute(0, 2, 1, 3).contiguous()
+        if cache.layout == "BHSD":
+            return quant_data.contiguous()
+        raise ValueError(f"Unsupported KV cache layout: {cache.layout}")
     
 
     def inference(

@@ -3,19 +3,8 @@ import torch
 from enum import Enum
 import re
 import math
-from .sim.quant.lowbit_quantize import (
-    nvfp4_e2m1_quantize_triton,
-    blockwise_int4_quantize_triton,
-    blockwise_int3_quantize_triton,
-    blockwise_int2_quantize_triton,
-)
 from .sim.quant.quantize_config import QuantizeConfig
-
-from .functions import (
-    kmeans_quantize_tensor,
-    prq_quantize_tensor,
-    triton_prq_quantize_tensor,
-)
+from .hqmq_fake import FakeHQMQCacheAdapter, HQMQ_FAKE_TYPES
 
 
 ########################################################
@@ -30,12 +19,18 @@ class QuantizeFunctions(Enum):
     NSTAGE_KMEANS_CLIP = "prq_clip"
     TRITON_PRQ = "triton_prq"
     TRITON_PRQ_CLIP = "triton_prq_clip"
+    HQMQ_FAKE = "hqmq_fake"
 
 
 def get_quantize_fn(quant_type: str, quant_config: QuantizeConfig):
+    if quant_type in HQMQ_FAKE_TYPES:
+        return FakeHQMQCacheAdapter.from_quant_config(quant_type, quant_config)
+
     if quant_type in ["naive-fp4", "kmeans-fp4", "nstages-kmeans-fp4", "nstages-kmeans-fp4-clip"]:
         def quantize_fn(x):
             """Quantization function - replace this to use different methods."""
+            from .sim.quant.lowbit_quantize import nvfp4_e2m1_quantize_triton
+
             return nvfp4_e2m1_quantize_triton(
                 x.contiguous(),
                 block_size=quant_config.quant_block_size,
@@ -44,6 +39,8 @@ def get_quantize_fn(quant_type: str, quant_config: QuantizeConfig):
     elif quant_type == "kmeans-fp4-clip":
         def quantize_fn(x):
             """Quantization function with percentile clipping."""
+            from .sim.quant.lowbit_quantize import nvfp4_e2m1_quantize_triton
+
             return nvfp4_e2m1_quantize_triton(
                 x.contiguous(),
                 block_size=quant_config.quant_block_size,
@@ -54,6 +51,8 @@ def get_quantize_fn(quant_type: str, quant_config: QuantizeConfig):
     elif quant_type in ["naive-int4", "kmeans-int4", "nstages-kmeans-int4", "nstages-kmeans-int4-clip"]:
         def quantize_fn(x):
             """Quantization function - replace this to use different methods."""
+            from .sim.quant.lowbit_quantize import blockwise_int4_quantize_triton
+
             return blockwise_int4_quantize_triton(
                 x.contiguous(),
                 block_size=quant_config.quant_block_size,
@@ -62,6 +61,8 @@ def get_quantize_fn(quant_type: str, quant_config: QuantizeConfig):
     elif quant_type == "kmeans-int4-clip":
         def quantize_fn(x):
             """Quantization function with percentile clipping."""
+            from .sim.quant.lowbit_quantize import blockwise_int4_quantize_triton
+
             return blockwise_int4_quantize_triton(
                 x.contiguous(),
                 block_size=quant_config.quant_block_size,
@@ -72,6 +73,8 @@ def get_quantize_fn(quant_type: str, quant_config: QuantizeConfig):
     elif quant_type in ["naive-int3", "kmeans-int3", "nstages-kmeans-int3", "nstages-kmeans-int3-clip"]:
         def quantize_fn(x):
             """Quantization function - replace this to use different methods."""
+            from .sim.quant.lowbit_quantize import blockwise_int3_quantize_triton
+
             return blockwise_int3_quantize_triton(
                 x.contiguous(),
                 block_size=quant_config.quant_block_size,
@@ -80,6 +83,8 @@ def get_quantize_fn(quant_type: str, quant_config: QuantizeConfig):
     elif quant_type == "kmeans-int3-clip":
         def quantize_fn(x):
             """Quantization function with percentile clipping."""
+            from .sim.quant.lowbit_quantize import blockwise_int3_quantize_triton
+
             return blockwise_int3_quantize_triton(
                 x.contiguous(),
                 block_size=quant_config.quant_block_size,
@@ -90,6 +95,8 @@ def get_quantize_fn(quant_type: str, quant_config: QuantizeConfig):
     elif quant_type in ["naive-int2", "kmeans-int2", "nstages-kmeans-int2", "nstages-kmeans-int2-clip"]:
         def quantize_fn(x):
             """Quantization function - replace this to use different methods."""
+            from .sim.quant.lowbit_quantize import blockwise_int2_quantize_triton
+
             return blockwise_int2_quantize_triton(
                 x.contiguous(),
                 block_size=quant_config.quant_block_size,
@@ -98,6 +105,8 @@ def get_quantize_fn(quant_type: str, quant_config: QuantizeConfig):
     elif quant_type == "kmeans-int2-clip":
         def quantize_fn(x):
             """Quantization function with percentile clipping."""
+            from .sim.quant.lowbit_quantize import blockwise_int2_quantize_triton
+
             return blockwise_int2_quantize_triton(
                 x.contiguous(),
                 block_size=quant_config.quant_block_size,
@@ -125,7 +134,9 @@ def get_quantize_type(quant_type: str):
     # ==========================================================
     # Determine preprocessing mode
     # ==========================================================
-    if quant_type in [
+    if quant_type in HQMQ_FAKE_TYPES:
+        quantize_type = QuantizeFunctions.HQMQ_FAKE
+    elif quant_type in [
         "kmeans-fp4",
         "kmeans-fp4-clip",
         "kmeans-int4",
@@ -168,10 +179,26 @@ def get_quantize_type(quant_type: str):
     return quantize_type
 
 
-def compress_kv_cache(k: torch.Tensor, v: torch.Tensor, quant_type: str, quant_config: QuantizeConfig, quantize_fn: callable):
+def compress_kv_cache(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    quant_type: str,
+    quant_config: QuantizeConfig,
+    quantize_fn: callable,
+    layer_idx: int = 0,
+):
     quantize_type = get_quantize_type(quant_type)
 
-    if quantize_type == QuantizeFunctions.NSTAGE_KMEANS:
+    if quantize_type == QuantizeFunctions.HQMQ_FAKE:
+        if not isinstance(quantize_fn, FakeHQMQCacheAdapter):
+            raise TypeError(
+                f"{quant_type} requires FakeHQMQCacheAdapter from get_quantize_fn, "
+                f"got {type(quantize_fn)!r}"
+            )
+        k_quant, v_quant = quantize_fn.quantize_pair(k, v, layer_idx=layer_idx)
+    elif quantize_type == QuantizeFunctions.NSTAGE_KMEANS:
+        from .functions import prq_quantize_tensor
+
         # Apply PRQ (multi-stage K-Means) based quantization
         k_quant = prq_quantize_tensor(
             k,
@@ -188,6 +215,7 @@ def compress_kv_cache(k: torch.Tensor, v: torch.Tensor, quant_type: str, quant_c
             quantize_fn=quantize_fn,
         )
     elif quantize_type == QuantizeFunctions.NSTAGE_KMEANS_CLIP:
+        from .functions import prq_quantize_tensor
 
         # Apply PRQ (multi-stage K-Means) based quantization
         k_quant = prq_quantize_tensor(
@@ -207,6 +235,8 @@ def compress_kv_cache(k: torch.Tensor, v: torch.Tensor, quant_type: str, quant_c
             use_percentile_clipping=True,
         )
     elif quantize_type == QuantizeFunctions.KMEANS:
+        from .functions import kmeans_quantize_tensor
+
         # Apply K-Means based quantization
         k_quant = kmeans_quantize_tensor(
             k,
@@ -221,6 +251,8 @@ def compress_kv_cache(k: torch.Tensor, v: torch.Tensor, quant_type: str, quant_c
             quantize_fn=quantize_fn,
         )
     elif quantize_type == QuantizeFunctions.TRITON_PRQ:
+        from .functions import triton_prq_quantize_tensor
+
         # Apply Triton N-Stage K-Means based quantization
         asymmetric = getattr(quant_config, "asymmetric", False)
         k_quant = triton_prq_quantize_tensor(
@@ -242,6 +274,8 @@ def compress_kv_cache(k: torch.Tensor, v: torch.Tensor, quant_type: str, quant_c
             asymmetric=asymmetric,
         )
     elif quantize_type == QuantizeFunctions.TRITON_PRQ_CLIP:
+        from .functions import triton_prq_quantize_tensor
+
         # Apply Triton N-Stage K-Means based quantization
         asymmetric = getattr(quant_config, "asymmetric", False)
         k_quant = triton_prq_quantize_tensor(

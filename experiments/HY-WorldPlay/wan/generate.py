@@ -348,7 +348,7 @@ if __name__ == "__main__":
     parser.add_argument("--pred_latent_size", type=int, default=4, help="Number of latent frames to predict per chunk")
 
     # ---- KV cache quantization ----
-    parser.add_argument("--quant_type", type=str, default="none", help="KV cache quantization type (e.g. 'none', 'naive-int4', 'triton-nstages-kmeans-int4')")
+    parser.add_argument("--quant_type", type=str, default="none", help="KV cache quantization type (e.g. 'none', 'triton-nstages-kmeans-int4', 'hqmq-fake', 'hqmq-fake-med3x')")
     parser.add_argument("--quant_block_size", type=int, default=16, help="Block size for KV cache quantization")
     parser.add_argument("--cache_num_k_centroids", type=int, default=256, help="Number of K-Means centroids for K tensor")
     parser.add_argument("--cache_num_v_centroids", type=int, default=256, help="Number of K-Means centroids for V tensor")

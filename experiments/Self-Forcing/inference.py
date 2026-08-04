@@ -40,7 +40,7 @@ parser.add_argument("--save_with_index", action="store_true",
 #########################################################
 # Quantization Configuration
 #########################################################
-parser.add_argument("--quant_type", type=str, default="none", help="Quantization type")
+parser.add_argument("--quant_type", type=str, default="none", help="Quantization type, e.g. hqmq-fake or hqmq-fake-med3x")
 parser.add_argument("--cache_num_k_centroids", type=int, default=256, help="Number of K-Means centroids for K tensor")
 parser.add_argument("--cache_num_v_centroids", type=int, default=256, help="Number of K-Means centroids for V tensor")
 parser.add_argument("--kmeans_max_iters", type=int, default=100, help="Maximum iterations for K-Means clustering")
