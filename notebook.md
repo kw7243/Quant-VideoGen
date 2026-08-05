@@ -443,3 +443,110 @@ plans/project-plan.md
 
 The legacy `videogen_plan.md` path was intentionally removed in favor of the standardized plan path.
 Future Quant-VideoGen work should read `plans/project-plan.md` before scoping experiments and update this `notebook.md` with meaningful changes, outcomes, failed ideas, and decisions.
+
+## 2026-08-05 - Upstream HQMQ Cache-Audit Scaffold
+
+Task: continue from official upstream `main`, recover the preserved fake-HQMQ
+work, and add a CPU-safe Stage-1 cache-audit scaffold without launching GPU
+jobs or duplicating the pending Med3x follow-up.
+
+Isolation and refs:
+
+- Worktree path and git top-level both resolved to
+  `/afs/csail.mit.edu/u/k/kwen1/.treehouse/quant-videogen-d60f5d/5/quant-videogen`.
+- Branch created: `fm/qvg-upstream-hqmq-cache-audit-scaffold`.
+- `git branch -a` showed local preserved refs
+  `fm/qvg-hqmq-fake-cache-adapter` and
+  `fm/qvg-project-layout-standardization`.
+- `git log --oneline --decorate --all --max-count=30` showed:
+  - `d1d0991` at `fm/qvg-hqmq-fake-cache-adapter`.
+  - `7565bfe` at `fm/qvg-project-layout-standardization`.
+  - current upstream/default baseline `0601468`.
+
+Recovered work:
+
+- Cherry-picked the fake-HQMQ adapter and smoke-gate work from the preserved
+  branch. The adapter commit conflicted only in `notebook.md` and
+  `quant_videogen/sim/quant/quantize_config.py`; resolution kept current
+  upstream chunk-quant policy fields and added the HQMQ fake defaults.
+- Cherry-picked the layout-standardization commit. The direct cherry-pick
+  added `plans/project-plan.md`; the notebook conflict was resolved by keeping
+  the recovered fake-smoke gate and adding only the standardized plan-path note,
+  not unrelated later Slurm operational notes from the layout branch history.
+
+New Stage-1 scaffold:
+
+- Added `tools/cache_audit.py`, a standalone JSON auditor for `torch.save`
+  cache artifacts. It avoids importing `quant_videogen.__init__` because that
+  path eagerly imports Triton-heavy compression code.
+- Metadata load path uses `torch._subclasses.fake_tensor.FakeTensorMode` and
+  tiny QVG pickle stubs for `ChunkedKVCache`, so existing cache dumps can be
+  inspected without materializing tensor storage or requiring the full QVG
+  runtime stack.
+- The JSON schema records input path, file size, mtime, safely visible
+  provenance keys, cache-object metadata, tensor path/shape/dtype/device/byte
+  estimates, layer/K/V-role/cache-position classification, layout summaries,
+  and explicit `metadata_only` or `unsupported_layout` markers.
+- Guarded full-stats mode computes numeric percentiles, Med3x-style outlier
+  fractions, per-head vector-norm summaries, sampled cache-position summaries,
+  HQMQ-style four-tuple radius stats, and temporal deltas when the tensor layout
+  is supported and byte limits allow CPU materialization.
+- Added `tests/test_cache_audit.py`, which creates a tiny synthetic artifact at
+  runtime and checks both the computed-stats schema and the metadata-only guard.
+
+Real artifact evidence:
+
+- The exact brief path
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1213946/kv_cache_frames27.pt`
+  was absent.
+- The dump exists at:
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1213946/kv_dumps/kv_cache_frames27.pt`.
+- `stat` reported size `7858486627` bytes and mtime
+  `2026-07-28 00:58:36.766679252 -0400`.
+- Metadata-only audit command:
+
+```bash
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tools/cache_audit.py \
+  /data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1213946/kv_dumps/kv_cache_frames27.pt \
+  --stats-mode metadata-only --compact \
+  -o results/cache_audit_frames27_metadata.json
+```
+
+Summary from the generated JSON:
+
+- Load mode: `fake_tensor_weights_only`; no trusted-pickle fallback was needed.
+- Status: `metadata_only`.
+- Tensor records: `1740`.
+- `ChunkedKVCache` objects: `60`.
+- Estimated tensor bytes: `7857930720`.
+- First self-attention K chunk:
+  `kv_cache[0].k.chunks[0]`, shape `[1, 1560, 12, 128]`, dtype
+  `torch.bfloat16`, layout `BSHD`, cache-position token span `[0, 1560)`,
+  estimated bytes `4792320`.
+- First cache object showed `27` allocated chunks, `frame_seq_length=1560`,
+  `num_heads=12`, `head_dim=128`, `layout=BSHD`, and all chunks in `BF16`
+  state.
+- Cross-attention layer-role summaries were also detected, giving `120`
+  layer-role groups across self-attention and cross-attention K/V.
+
+Validation:
+
+```bash
+python3 -m py_compile tools/cache_audit.py tests/test_cache_audit.py
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_cache_audit.py
+```
+
+Both passed. `/data/scratch-fast/kwen1/eval_envs/vbench/bin/python -m pytest
+tests/test_cache_audit.py` could not run because that environment has no
+`pytest` module, so the direct smoke entrypoint was used. No Slurm jobs, GPU
+inference runs, or long experiments were launched. The existing Med3x follow-up
+job `1295590` was not touched.
+
+Next smallest experiment:
+
+Run the auditor on a deliberately small subset or synthetic extraction that is
+below the byte guards with `--stats-mode auto`, then inspect K/V asymmetry,
+per-head radius outliers, and temporal-delta percentiles. If full-artifact
+statistics are needed, first create a bounded CPU-side extraction of a few
+layers, roles, and chunks from the existing dump rather than forcing full
+materialization of the 7.86 GB artifact.

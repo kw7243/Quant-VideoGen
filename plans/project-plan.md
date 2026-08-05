@@ -564,6 +564,19 @@ Proceed only when:
 
 Identify the properties that should guide method selection.
 
+## Current scaffold
+
+Use `tools/cache_audit.py` for Stage-1 cache artifact inspection. It first
+loads `torch.save` artifacts with `FakeTensorMode` and byte guards, then emits a
+JSON schema covering file metadata, provenance keys, tensor paths, shapes,
+dtypes, devices, byte estimates, layer/K/V/head/cache-position summaries,
+HQMQ-style four-tuple radius stats when full stats are safe, temporal deltas,
+and explicit `metadata_only` or `unsupported_layout` markers.
+
+Default `auto` mode does not full-load artifacts larger than 1 GiB or with more
+than 512 MiB of estimated tensor storage. Use `--stats-mode metadata-only` for
+large dumps and `--stats-mode force` only for deliberately bounded CPU audits.
+
 ## Data collection
 
 Use:
