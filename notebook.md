@@ -639,3 +639,140 @@ Next check: wait for job `1227740` to start/finish, then inspect the logs for
 `SMOKE_CONFIG`, `memory_estimate`, H200 VRAM/CUDA evidence,
 `HQMQ Fake Diagnostics`, quantization times, peak/KV memory, output MP4 media
 metadata, contact sheet, and KV dump metadata.
+
+## 2026-08-04 - Med3x Smoke Resume Uses Canonical Plan Path
+
+Task: resume the bounded Self-Forcing `hqmq-fake-med3x` continuation after
+experiment execution was restarted.
+
+- Verified this task is using the canonical project layout. The plan now lives
+  at `plans/project-plan.md` in this branch, copied from
+  `/data/scratch-fast/kwen1/firstmate/projects/quant-videogen/plans/project-plan.md`.
+- Legacy plan symlinks were intentionally removed; this task does not recreate
+  `videogen_plan.md` or rely on `/data/scratch-fast/kwen1/quant-videogen`.
+- Required continuation branch
+  `fm/qvg-self-forcing-review-next-smoke@c3c0f84f7bfc99e28dcb419934be00968ebfe380`
+  was merged into `fm/qvg-med3x-smoke-resume-analysis`.
+- Optional metrics scaffold is not merged for this lane because there is no
+  valid BF16/candidate pair planned; use lightweight media/log inspection for
+  the single conservative smoke unless paired outputs become available.
+
+Pre-submit validation and resource decision:
+
+- AFS/Kerberos credentials are present; `klist` shows CSAIL tickets and
+  `tokens` shows CSAIL AFS tokens through 2026-08-04 midday.
+- Scratch caches are available:
+  `HF_HOME=/data/scratch-fast/kwen1/.cache/huggingface` and
+  `PIP_CACHE_DIR=/data/scratch-fast/kwen1/.cache/pip`.
+- Self-Forcing checkpoint symlinks were created inside this disposable
+  worktree and point to the canonical scratch assets used by the standardized
+  project checkout.
+- Current shell is a CPU Slurm allocation on `groenig-5`; `nvidia-smi` is not
+  available here, so GPU inference must run through the staged Slurm job.
+- Account/QoS/partition check: `vision-torralba-urops-meng` has QoS
+  `vision-torralba-urops-meng`; `vision-torralba-h200` and
+  `vision-torralba-rtx3090` are both UP.
+- H200 decision retained: current H200 node evidence shows
+  `torralba-h200-1`, `gpu:h200:8`, `RealMemory=2063711M`,
+  `FreeMem=1923614M`; prior job logs show one NVIDIA H200 with
+  `143771MiB` VRAM. The 27-frame estimate is `29323.85 MB` peak VRAM and
+  `36654.81 MB` with 25% margin, so the H200 path is conservative. RTX 3090
+  nodes are available but smaller than this margin and were not used.
+- Focused validation passed:
+  `PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_hqmq_fake.py`,
+  `PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/visionreward/bin/python tests/test_hqmq_fake.py`,
+  `bash -n scripts/Self-Forcing/smoke_hqmq_fake.sbatch`,
+  `python3 -m py_compile ...`, and `git diff --check`.
+
+HYPOTHESIS:
+One staged one-prompt `hqmq-fake-med3x` Self-Forcing smoke at 27 output frames
+will complete on H200 and produce finite fake-HQMQ diagnostics plus a valid,
+nonblank prompt-plausible MP4, extending the dense fake-HQMQ evidence path.
+
+WHY THIS EXPERIMENT MATTERS:
+The prior dense fake-HQMQ smoke succeeded visually, but the Med3x outlier
+restoration path has not yet produced Self-Forcing GPU/video evidence because
+job `1227740` was canceled before start.
+
+MANIPULATED VARIABLE:
+`QUANT_TYPE=hqmq-fake-med3x`.
+
+CONTROLLED VARIABLES:
+Prompt limit 1, `NUM_OUTPUT_FRAMES=27`, `LOCAL_ATTN_SIZE=27`, `NUM_SAMPLES=1`,
+`DUMP_KV_LEVEL=1`, same Self-Forcing script, same checkpoint assets, same H200
+partition/account/QoS, scratch-backed caches, and staged repository execution.
+
+PRIMARY METRIC:
+Slurm completion with exit code `0:0`, finite fake-HQMQ diagnostics, and a valid
+output MP4.
+
+SECONDARY METRICS:
+Outlier rate, effective bits per value, quantization time, peak/KV memory,
+host RSS, H200 VRAM evidence, MP4 metadata/nonblank frames, and KV dump
+metadata/size.
+
+EXPECTED RESULT:
+The job completes similarly to dense fake-HQMQ but logs Med3x outlier rates and
+slightly higher effective bits per value.
+
+FALSIFYING RESULT:
+NaN/Inf diagnostics, cache layout failure, OOM, missing/blank MP4, missing KV
+dump, or Slurm nonzero exit.
+
+DECISION RULE:
+If complete and valid, inspect artifacts and record the next smallest paired
+BF16/candidate or cache-audit experiment. If pending for a long external wait,
+pause with job/log/output paths and current `squeue` evidence. If failed, do
+not resubmit; inspect logs and record the smallest fix.
+
+Queued submission:
+
+- Staged path:
+  `/data/scratch-fast/kwen1/qvg-staging/20260804_005750-1cb44a-d2f94b2-code`.
+- Staged metadata command:
+  `env QUANT_TYPE=hqmq-fake-med3x PROMPT_LIMIT=1 RUN_LABEL_PREFIX=hqmq_fake_med3x_27f_prompt1 NUM_OUTPUT_FRAMES=27 LOCAL_ATTN_SIZE=27 NUM_SAMPLES=1 DUMP_KV_LEVEL=1 sbatch scripts/Self-Forcing/smoke_hqmq_fake.sbatch`.
+- Slurm job id: `1295590`.
+- Queue state at 2026-08-04 00:58 local: `PENDING`, reason `Resources`.
+- `squeue --start` estimated start: `2026-08-07T20:42:07` on
+  `torralba-h200-1`.
+- Expected logs after start:
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-logs/qvg_sf_hqmq_smoke-1295590.out`
+  and
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-logs/qvg_sf_hqmq_smoke-1295590.err`.
+- Expected output after start:
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_med3x_27f_prompt1_1295590`.
+
+RESULT:
+The single bounded smoke was staged and accepted by Slurm but has not started.
+
+CONFIDENCE:
+High for submission state because `scontrol show job 1295590` records the staged
+command, workdir, account, QoS, partition, requested TRES, and log paths.
+
+MAIN EVIDENCE:
+`scontrol` shows `JobState=PENDING`, `Reason=Resources`,
+`Partition=vision-torralba-h200`, `QOS=vision-torralba-urops-meng`,
+`ReqTRES=cpu=8,mem=96G,node=1,billing=5800,gres/gpu=1`, and
+`SchedNodeList=torralba-h200-1`.
+
+FAILURE MODES:
+No runtime failure yet. The only current issue is external H200 resource wait.
+
+STORAGE BYTES:
+No new MP4 or KV dump exists yet.
+
+PEAK VRAM:
+No runtime peak exists yet; pre-submit estimate remains `29323.85 MB` peak and
+`36654.81 MB` with 25% margin.
+
+RUNTIME:
+No runtime yet. Slurm time limit is one hour.
+
+DECISION:
+Pause rather than submit another job. Do not launch a 3090 fallback unless the
+queued H200 path is explicitly canceled or superseded.
+
+NEXT EXPERIMENT:
+After job `1295590` completes, inspect Slurm state/exit code, stdout/stderr
+diagnostics, MP4 metadata/nonblank frames/contact sheet, KV dump metadata/size,
+and then decide the next smallest paired BF16/candidate or cache-audit run.
