@@ -550,3 +550,176 @@ per-head radius outliers, and temporal-delta percentiles. If full-artifact
 statistics are needed, first create a bounded CPU-side extraction of a few
 layers, roles, and chunks from the existing dump rather than forcing full
 materialization of the 7.86 GB artifact.
+
+## 2026-08-05 - Bounded Real-Artifact Cache Statistics
+
+Task: continue from the pushed cache-audit scaffold and produce bounded
+real-artifact evidence for K/V asymmetry, layer/head outliers, HQMQ-style
+four-tuple radius structure, and temporal/chunk drift. No Slurm jobs or GPU
+inference were launched, and the separate Med3x Slurm job `1295590` was not
+touched.
+
+Isolation and base:
+
+```bash
+pwd -P
+git rev-parse --show-toplevel
+git checkout -b fm/qvg-bounded-cache-stats-analysis
+git fetch kw7243 fm/qvg-upstream-hqmq-cache-audit-scaffold
+git reset --hard FETCH_HEAD
+git checkout -B fm/qvg-bounded-cache-stats-analysis
+```
+
+Both path checks resolved to:
+
+```text
+/afs/csail.mit.edu/u/k/kwen1/.treehouse/quant-videogen-d60f5d/5/quant-videogen
+```
+
+Real artifact:
+
+```text
+/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1213946/kv_dumps/kv_cache_frames27.pt
+```
+
+`stat` reported:
+
+```text
+7858486627 bytes, mtime 2026-07-28 00:58:36.766679252 -0400
+```
+
+Tooling changes:
+
+- Extended `tools/cache_audit.py` with `--make-subset` to write a bounded
+  tensor-only subset while preserving original source tensor paths.
+- Added aggregate stats for K/V role, layer/role, chunk, per-head summaries,
+  and selected chunk drift.
+- Added a 4-tuple radius-only quantization error proxy for 2-bit and 4-bit
+  radius quantization. This preserves tuple directions and therefore is not
+  full HQMQ direction-codebook error.
+- Added a smoke test for the subset schema in `tests/test_cache_audit.py`.
+
+Quick metadata command used only for read-only selection planning:
+
+```bash
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tools/cache_audit.py \
+  /data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1213946/kv_dumps/kv_cache_frames27.pt \
+  --stats-mode metadata-only --compact \
+  -o /data/scratch-fast/kwen1/firstmate/data/qvg-bounded-cache-stats-analysis/cache_audit_frames27_metadata.json
+```
+
+Bounded subset command, run from staged repo:
+
+```bash
+/afs/csail.mit.edu/u/k/kwen1/.codex/skills/research-reproducibility/scripts/stage_and_run.sh -- \
+  /data/scratch-fast/kwen1/eval_envs/vbench/bin/python tools/cache_audit.py \
+  /data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1213946/kv_dumps/kv_cache_frames27.pt \
+  --make-subset /data/scratch-fast/kwen1/firstmate/data/qvg-bounded-cache-stats-analysis/cache_audit_frames27_subset.pt \
+  --subset-layers 0,14,29 \
+  --subset-chunks 0,13,26 \
+  --subset-roles key,value \
+  --max-subset-bytes 134217728 \
+  --compact \
+  -o /data/scratch-fast/kwen1/firstmate/data/qvg-bounded-cache-stats-analysis/cache_audit_frames27_subset_manifest.json
+```
+
+Staged repo:
+
+```text
+/afs/csail.mit.edu/u/k/kwen1/.treehouse/quant-videogen-d60f5d/5/quant-videogen/staging/20260805_015621-24b6fd-378b932-code
+```
+
+Subset:
+
+```text
+/data/scratch-fast/kwen1/firstmate/data/qvg-bounded-cache-stats-analysis/cache_audit_frames27_subset.pt
+```
+
+Subset manifest summary:
+
+- `selected_tensor_count`: `18`.
+- Selection: self-attention layers `0,14,29`, roles `key,value`, chunks
+  `0,13,26`.
+- `selected_estimated_bytes`: `86261760`.
+- Subset file size: `86271704` bytes.
+- `max_subset_bytes`: `134217728`.
+- Full-artifact stats load mode for extraction: `cpu_weights_only_mmap`.
+
+Bounded stats command, run from staged repo:
+
+```bash
+/afs/csail.mit.edu/u/k/kwen1/.codex/skills/research-reproducibility/scripts/stage_and_run.sh -- \
+  /data/scratch-fast/kwen1/eval_envs/vbench/bin/python tools/cache_audit.py \
+  /data/scratch-fast/kwen1/firstmate/data/qvg-bounded-cache-stats-analysis/cache_audit_frames27_subset.pt \
+  --stats-mode auto \
+  --max-full-load-bytes 134217728 \
+  --max-total-stat-bytes 134217728 \
+  --max-tensor-stat-bytes 16777216 \
+  --max-time-points 32 \
+  --compact \
+  -o /data/scratch-fast/kwen1/firstmate/data/qvg-bounded-cache-stats-analysis/cache_audit_frames27_bounded_stats.json
+```
+
+Staged repo:
+
+```text
+/afs/csail.mit.edu/u/k/kwen1/.treehouse/quant-videogen-d60f5d/5/quant-videogen/staging/20260805_020448-70b895-378b932-code
+```
+
+Committed result copies:
+
+```text
+analysis/cache_audit_frames27_subset_manifest.json
+analysis/cache_audit_frames27_bounded_stats.json
+analysis/cache_audit_frames27_bounded_summary.md
+```
+
+Private Firstmate result copies:
+
+```text
+/data/scratch-fast/kwen1/firstmate/data/qvg-bounded-cache-stats-analysis/cache_audit_frames27_subset_manifest.json
+/data/scratch-fast/kwen1/firstmate/data/qvg-bounded-cache-stats-analysis/cache_audit_frames27_bounded_stats.json
+```
+
+Main results:
+
+- `--stats-mode auto` computed stats on all 18 selected tensors under the byte
+  guards.
+- K versus V asymmetry:
+  - K vector-norm p95 mean `48.255` versus V `18.260`.
+  - K tuple4 radius outlier fraction mean `0.1205` versus V `0.0047`.
+  - K radius-only 4-bit relative L2 proxy mean `0.0189` versus V `0.0123`.
+  - V temporal relative-delta p95 mean `1.3969` versus K `0.8765`.
+- Layer/head outliers:
+  - Layer 29 K vector-norm p95 mean `102.754`, with tensor-level
+    vector-norm outlier fraction `0.0833`.
+  - Layer 29 K head 9 dominates per-head norm p95: mean `104.263`, max
+    `106.346`; the next sampled head is about `27`.
+  - Layer 0 K has ordinary vector-norm p95 but high tuple4 radius outlier rate:
+    mean `0.2290`, max-to-median radius mean `28.64`.
+- Four-tuple radius structure:
+  - Head dim is `128`, so there are 32 four-tuples per token.
+  - K radius p95 mean `5.659`; V radius p95 mean `3.764`.
+  - K 2-bit radius-only proxy mean `0.2144`; V `0.1656`.
+- Temporal/chunk drift:
+  - Chunks 0 and 13 have radius-only 4-bit proxy mean near `0.00145`.
+  - Chunk 26 jumps to `0.04388` while norm/radius magnitude and within-chunk
+    temporal relative deltas stay roughly stable.
+  - This is consistent with a final-chunk or refresh-state difference, but it
+    needs a targeted adjacent-chunk follow-up before treating it as mechanism.
+
+Failed or deliberately skipped ideas:
+
+- Did not run `--stats-mode force` on the 7.86 GB artifact.
+- Did not materialize all tensors from the full dump.
+- Did not submit Slurm jobs or launch GPU inference.
+- Did not claim direct quantization error because this artifact lacks a paired
+  BF16 pre-quant cache. The reported error is only a radius-preserving proxy.
+
+Next smallest experiment:
+
+Expand the subset only around the observed structure: layers 27-29, heads 0 and
+9 for K, and chunks 24-26 plus one adjacent earlier chunk. Add a paired BF16 or
+pre/post fake-HQMQ cache dump so direct cache quantization error and
+attention-output error can be measured before any video-quality or novelty
+claim.

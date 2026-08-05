@@ -45,6 +45,28 @@ def _write_synthetic_artifact(path: Path) -> None:
     torch.save(artifact, path)
 
 
+def _write_chunked_synthetic_artifact(path: Path) -> None:
+    kv_cache = []
+    for layer_idx in range(2):
+        chunks_k = []
+        chunks_v = []
+        for chunk_idx in range(3):
+            base = layer_idx * 10 + chunk_idx
+            k = torch.arange(1 * 72 * 2 * 8, dtype=torch.float32).reshape(1, 72, 2, 8)
+            k = (k + base) / 100
+            v = torch.flip(k, dims=[1]) * (1.0 + layer_idx)
+            chunks_k.append(k)
+            chunks_v.append(v)
+        kv_cache.append({"k": {"chunks": chunks_k}, "v": {"chunks": chunks_v}})
+    torch.save(
+        {
+            "provenance": {"source": "synthetic-chunked-cache-audit-fixture"},
+            "kv_cache": kv_cache,
+        },
+        path,
+    )
+
+
 def test_cache_audit_schema_and_stats(tmp_path):
     cache_audit = _load_cache_audit_module()
     artifact = tmp_path / "synthetic_kv_cache.pt"
@@ -76,6 +98,9 @@ def test_cache_audit_schema_and_stats(tmp_path):
     assert k_info["stats"]["tuple4_radius"]["supported"] is True
     assert k_info["stats"]["temporal_deltas"]["supported"] is True
     assert k_info["stats"]["per_cache_position"]["sampled_count"] == 8
+    assert "radius_quantization_error_proxy" in k_info["stats"]["tuple4_radius"]
+    assert summary["stats_aggregates"]["computed_tensor_count"] == 4
+    assert "key" in summary["stats_aggregates"]["by_kv_role"]
 
     layer_key = "self_attention:layer_0:key"
     assert layer_key in summary["layout_summary"]["by_layer_role"]
@@ -99,8 +124,45 @@ def test_cache_audit_metadata_only_guard(tmp_path):
     assert all(item["stats_status"] == "metadata_only" for item in summary["tensors"])
 
 
+def test_cache_audit_real_path_subset_schema(tmp_path):
+    cache_audit = _load_cache_audit_module()
+    artifact = tmp_path / "synthetic_chunked_kv_cache.pt"
+    subset = tmp_path / "subset.pt"
+    _write_chunked_synthetic_artifact(artifact)
+
+    manifest = cache_audit.create_subset_artifact(
+        artifact,
+        subset,
+        subset_layers="0,1",
+        subset_chunks="0,2",
+        subset_roles="key,value",
+        max_subset_bytes=10 * 1024**2,
+    )
+    assert manifest["selected_tensor_count"] == 8
+    assert manifest["selection"]["layers"] == [0, 1]
+    assert manifest["selection"]["chunks"] == [0, 2]
+
+    summary = cache_audit.audit_artifact(
+        subset,
+        stats_mode="auto",
+        max_full_load_bytes=10 * 1024**2,
+        max_total_stat_bytes=10 * 1024**2,
+        max_tensor_stat_bytes=10 * 1024**2,
+    )
+
+    assert summary["load"]["status"] == "stats_computed"
+    assert summary["provenance"]["qvg_cache_audit_subset"]["selected_tensor_count"] == 8
+    tensors = {item["path"]: item for item in summary["tensors"]}
+    assert "kv_cache[1].v.chunks[2]" in tensors
+    assert tensors["kv_cache[1].v.chunks[2]"]["cache_position"]["start_token"] == 144
+    assert summary["stats_aggregates"]["computed_tensor_count"] == 8
+    assert summary["stats_aggregates"]["chunk_drift"]
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmpdir:
         test_cache_audit_schema_and_stats(Path(tmpdir))
     with tempfile.TemporaryDirectory() as tmpdir:
         test_cache_audit_metadata_only_guard(Path(tmpdir))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_cache_audit_real_path_subset_schema(Path(tmpdir))

@@ -21,7 +21,7 @@ from pathlib import Path
 import re
 import sys
 import types
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 try:
     import torch
@@ -36,6 +36,7 @@ SCHEMA_VERSION = "qvg-cache-audit.v1"
 DEFAULT_MAX_FULL_LOAD_BYTES = 1 * 1024**3
 DEFAULT_MAX_TENSOR_STAT_BYTES = 256 * 1024**2
 DEFAULT_MAX_TOTAL_STAT_BYTES = 512 * 1024**2
+DEFAULT_MAX_SUBSET_BYTES = 128 * 1024**2
 DEFAULT_MAX_TIME_POINTS = 64
 PERCENTILES = (0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100)
 PROVENANCE_KEYS = {
@@ -49,6 +50,7 @@ PROVENANCE_KEYS = {
     "provenance",
     "quant_config",
     "quant_type",
+    "qvg_cache_audit_subset",
     "run_config",
     "seed",
 }
@@ -452,11 +454,24 @@ def _extract_context_from_path(path: str, context: dict[str, Any], shape: list[i
     elif re.search(r"(^|\.)v($|\.|\[)", path):
         result["kv_role"] = "value"
 
+    layout = result.get("layout")
+    if not layout:
+        layout = _infer_layout(path, shape, result)
+        if layout:
+            result["layout"] = layout
+
     chunk_match = re.search(r"\.chunks\[(\d+)\]", path)
     if chunk_match:
         chunk_idx = int(chunk_match.group(1))
         result["chunk_idx"] = chunk_idx
         frame_seq_length = result.get("frame_seq_length")
+        if not isinstance(frame_seq_length, int):
+            if layout == "BSHD" and len(shape) >= 2 and isinstance(shape[1], int):
+                frame_seq_length = shape[1]
+                result["frame_seq_length"] = frame_seq_length
+            elif layout == "BHSD" and len(shape) >= 3 and isinstance(shape[2], int):
+                frame_seq_length = shape[2]
+                result["frame_seq_length"] = frame_seq_length
         if isinstance(frame_seq_length, int):
             result["cache_position"] = {
                 "chunk_index": chunk_idx,
@@ -466,12 +481,6 @@ def _extract_context_from_path(path: str, context: dict[str, Any], shape: list[i
 
     if "quantized_spans" in path:
         result["packed_quantized_span"] = True
-
-    layout = result.get("layout")
-    if not layout:
-        layout = _infer_layout(path, shape, result)
-        if layout:
-            result["layout"] = layout
 
     return result
 
@@ -513,6 +522,7 @@ class _Collector:
             "layer_idx": resolved_context.get("layer_idx"),
             "kv_role": resolved_context.get("kv_role"),
             "layout": resolved_context.get("layout"),
+            "chunk_idx": resolved_context.get("chunk_idx"),
             "cache_position": resolved_context.get("cache_position"),
             "packed_quantized_span": bool(resolved_context.get("packed_quantized_span", False)),
             "stats_status": "pending",
@@ -578,6 +588,19 @@ def _traverse(
         return
 
     if isinstance(value, dict):
+        source_path = value.get("source_path")
+        tensor = value.get("tensor")
+        if isinstance(source_path, str) and _is_tensor(tensor):
+            next_context = dict(context)
+            source_context = value.get("source_context")
+            if isinstance(source_context, dict):
+                next_context.update(source_context)
+            next_context["subset_record"] = _safe_jsonify(
+                {key: item for key, item in value.items() if key != "tensor"}
+            )
+            collector.visit_tensor(source_path, tensor, next_context)
+            return
+
         for key, item in value.items():
             key_context = dict(context)
             if str(key) == "quantized_spans":
@@ -765,6 +788,23 @@ def _cache_tensor_stats(tensor: Any, info: dict[str, Any], *, max_time_points: i
     if head_dim % 4 == 0:
         tuples = bhsd.reshape(batch, heads, seq_len, head_dim // 4, 4)
         radii = th.linalg.vector_norm(tuples, dim=-1)
+        radius_quantization: dict[str, Any] = {
+            "assumption": "radius-only proxy; directions are preserved and full HQMQ direction-codebook error is not measured",
+            "bits": {},
+        }
+        direction = tuples / radii.unsqueeze(-1).clamp(min=1e-8)
+        denom = th.linalg.vector_norm(tuples.reshape(-1)).clamp(min=1e-12)
+        for bits in (2, 4):
+            qmax = (1 << bits) - 1
+            scale = radii.amax(dim=-1, keepdim=True).clamp(min=1e-8) / qmax
+            quantized_radii = (radii / scale).round().clamp(0, qmax) * scale
+            reconstructed = direction * quantized_radii.unsqueeze(-1)
+            rel_l2 = th.linalg.vector_norm((reconstructed - tuples).reshape(-1)) / denom
+            relative_radius_error = (quantized_radii - radii).abs() / radii.clamp(min=1e-8)
+            radius_quantization["bits"][str(bits)] = {
+                "relative_l2": _safe_float(rel_l2.item()),
+                "relative_radius_error_percentiles": _quantiles(relative_radius_error),
+            }
         result["tuple4_radius"] = {
             "supported": True,
             "tuples_per_token": head_dim // 4,
@@ -772,6 +812,7 @@ def _cache_tensor_stats(tensor: Any, info: dict[str, Any], *, max_time_points: i
             "radius": _mean_std(radii),
             "radius_outlier_med3": _outlier_fraction(radii),
             "zero_radius_fraction": _safe_float((radii == 0).float().mean().item()),
+            "radius_quantization_error_proxy": radius_quantization,
         }
         median = radii.reshape(-1).float().median()
         max_radius = radii.reshape(-1).float().max()
@@ -803,6 +844,452 @@ def _cache_tensor_stats(tensor: Any, info: dict[str, Any], *, max_time_points: i
         }
 
     return result
+
+
+def _get_nested(mapping: dict[str, Any], keys: Sequence[str]) -> Any:
+    value: Any = mapping
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return None
+        value = value[key]
+    return value
+
+
+def _finite_values(values: Iterable[Any]) -> list[float]:
+    result: list[float] = []
+    for value in values:
+        parsed = _safe_float(value)
+        if parsed is not None:
+            result.append(parsed)
+    return result
+
+
+def _summary_stats(values: Iterable[Any]) -> dict[str, float | None]:
+    vals = _finite_values(values)
+    if not vals:
+        return {"mean": None, "min": None, "max": None}
+    return {
+        "mean": _safe_float(sum(vals) / len(vals)),
+        "min": _safe_float(min(vals)),
+        "max": _safe_float(max(vals)),
+    }
+
+
+def _ratio(numerator: Any, denominator: Any) -> float | None:
+    top = _safe_float(numerator)
+    bottom = _safe_float(denominator)
+    if top is None or bottom is None or abs(bottom) < 1e-12:
+        return None
+    return _safe_float(top / bottom)
+
+
+def _tensor_metric_record(info: dict[str, Any]) -> dict[str, Any] | None:
+    if info.get("stats_status") != "computed":
+        return None
+    if info.get("kv_role") not in {"key", "value", "key_no_rope"}:
+        return None
+    stats = info.get("stats")
+    if not isinstance(stats, dict):
+        return None
+    if not isinstance(stats.get("norms"), dict):
+        return None
+    chunk_idx = info.get("chunk_idx")
+    cache_position = info.get("cache_position")
+    if chunk_idx is None and isinstance(cache_position, dict):
+        chunk_idx = cache_position.get("chunk_index")
+    record = {
+        "path": info.get("path"),
+        "cache_kind": info.get("cache_kind"),
+        "layer_idx": info.get("layer_idx"),
+        "kv_role": info.get("kv_role"),
+        "chunk_idx": chunk_idx,
+        "estimated_bytes": info.get("estimated_bytes") or 0,
+        "vector_norm_p50": _get_nested(stats, ("norms", "vector_norm_percentiles", "50")),
+        "vector_norm_p95": _get_nested(stats, ("norms", "vector_norm_percentiles", "95")),
+        "vector_norm_p99": _get_nested(stats, ("norms", "vector_norm_percentiles", "99")),
+        "vector_norm_outlier_med3_fraction": _get_nested(
+            stats, ("norms", "vector_norm_outlier_med3", "fraction")
+        ),
+        "abs_value_p99": _get_nested(stats, ("numeric", "abs_percentiles", "99")),
+        "abs_value_outlier_med3_fraction": _get_nested(
+            stats, ("numeric", "abs_outlier_med3", "fraction")
+        ),
+        "tuple4_radius_p50": _get_nested(stats, ("tuple4_radius", "radius_percentiles", "50")),
+        "tuple4_radius_p95": _get_nested(stats, ("tuple4_radius", "radius_percentiles", "95")),
+        "tuple4_radius_p99": _get_nested(stats, ("tuple4_radius", "radius_percentiles", "99")),
+        "tuple4_radius_max_to_median": _get_nested(stats, ("tuple4_radius", "max_to_median")),
+        "tuple4_radius_outlier_med3_fraction": _get_nested(
+            stats, ("tuple4_radius", "radius_outlier_med3", "fraction")
+        ),
+        "radius_only_rel_l2_bits2": _get_nested(
+            stats,
+            (
+                "tuple4_radius",
+                "radius_quantization_error_proxy",
+                "bits",
+                "2",
+                "relative_l2",
+            ),
+        ),
+        "radius_only_rel_l2_bits4": _get_nested(
+            stats,
+            (
+                "tuple4_radius",
+                "radius_quantization_error_proxy",
+                "bits",
+                "4",
+                "relative_l2",
+            ),
+        ),
+        "temporal_delta_norm_p95": _get_nested(
+            stats, ("temporal_deltas", "delta_norm_percentiles", "95")
+        ),
+        "temporal_relative_delta_p50": _get_nested(
+            stats, ("temporal_deltas", "relative_delta_percentiles", "50")
+        ),
+        "temporal_relative_delta_p95": _get_nested(
+            stats, ("temporal_deltas", "relative_delta_percentiles", "95")
+        ),
+    }
+    return record
+
+
+def _summarize_metric_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    metric_keys = [
+        "vector_norm_p50",
+        "vector_norm_p95",
+        "vector_norm_p99",
+        "vector_norm_outlier_med3_fraction",
+        "abs_value_p99",
+        "abs_value_outlier_med3_fraction",
+        "tuple4_radius_p50",
+        "tuple4_radius_p95",
+        "tuple4_radius_p99",
+        "tuple4_radius_max_to_median",
+        "tuple4_radius_outlier_med3_fraction",
+        "radius_only_rel_l2_bits2",
+        "radius_only_rel_l2_bits4",
+        "temporal_delta_norm_p95",
+        "temporal_relative_delta_p50",
+        "temporal_relative_delta_p95",
+    ]
+    result: dict[str, Any] = {
+        "tensor_count": len(records),
+        "estimated_bytes": sum(int(record.get("estimated_bytes") or 0) for record in records),
+        "layers": sorted({record["layer_idx"] for record in records if record.get("layer_idx") is not None}),
+        "chunks": sorted({record["chunk_idx"] for record in records if record.get("chunk_idx") is not None}),
+    }
+    for key in metric_keys:
+        result[key] = _summary_stats(record.get(key) for record in records)
+    return result
+
+
+def _stats_aggregates(tensors: list[dict[str, Any]]) -> dict[str, Any]:
+    records = [record for info in tensors if (record := _tensor_metric_record(info)) is not None]
+    result: dict[str, Any] = {
+        "computed_tensor_count": len(records),
+        "computed_estimated_bytes": sum(int(record.get("estimated_bytes") or 0) for record in records),
+        "by_kv_role": {},
+        "by_layer_role": {},
+        "by_chunk_idx": {},
+        "per_head_summary": [],
+        "worst_heads": {
+            "by_vector_norm_p95_max": [],
+            "by_outlier_fraction_max": [],
+        },
+        "chunk_drift": [],
+    }
+    if not records:
+        return result
+
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        grouped[("role", record.get("kv_role"))].append(record)
+        grouped[
+            (
+                "layer_role",
+                record.get("cache_kind"),
+                record.get("layer_idx"),
+                record.get("kv_role"),
+            )
+        ].append(record)
+        grouped[("chunk", record.get("chunk_idx"))].append(record)
+
+    for key, group in grouped.items():
+        group_type = key[0]
+        if group_type == "role":
+            result["by_kv_role"][str(key[1])] = _summarize_metric_records(group)
+        elif group_type == "layer_role":
+            _, cache_kind, layer_idx, role = key
+            out_key = f"{cache_kind or 'unknown'}:layer_{layer_idx}:{role}"
+            result["by_layer_role"][out_key] = _summarize_metric_records(group)
+        elif group_type == "chunk":
+            result["by_chunk_idx"][str(key[1])] = _summarize_metric_records(group)
+
+    head_groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for info in tensors:
+        if info.get("stats_status") != "computed":
+            continue
+        stats = info.get("stats")
+        if not isinstance(stats, dict):
+            continue
+        cache_position = info.get("cache_position")
+        chunk_idx = info.get("chunk_idx")
+        if chunk_idx is None and isinstance(cache_position, dict):
+            chunk_idx = cache_position.get("chunk_index")
+        for head in stats.get("per_head", []):
+            if not isinstance(head, dict):
+                continue
+            head_groups[
+                (
+                    info.get("cache_kind"),
+                    info.get("layer_idx"),
+                    info.get("kv_role"),
+                    head.get("head_idx"),
+                )
+            ].append(
+                {
+                    "chunk_idx": chunk_idx,
+                    "p95": head.get("p95"),
+                    "mean": head.get("mean"),
+                    "outlier_fraction_med3": head.get("outlier_fraction_med3"),
+                }
+            )
+
+    per_head_summary = []
+    for (cache_kind, layer_idx, role, head_idx), group in sorted(
+        head_groups.items(), key=lambda item: tuple(str(part) for part in item[0])
+    ):
+        entry = {
+            "cache_kind": cache_kind,
+            "layer_idx": layer_idx,
+            "kv_role": role,
+            "head_idx": head_idx,
+            "sample_count": len(group),
+            "chunks": sorted({item["chunk_idx"] for item in group if item.get("chunk_idx") is not None}),
+            "vector_norm_p95": _summary_stats(item.get("p95") for item in group),
+            "vector_norm_mean": _summary_stats(item.get("mean") for item in group),
+            "outlier_fraction_med3": _summary_stats(item.get("outlier_fraction_med3") for item in group),
+        }
+        per_head_summary.append(entry)
+    result["per_head_summary"] = per_head_summary
+    result["worst_heads"]["by_vector_norm_p95_max"] = sorted(
+        per_head_summary,
+        key=lambda item: item["vector_norm_p95"]["max"] if item["vector_norm_p95"]["max"] is not None else -1,
+        reverse=True,
+    )[:12]
+    result["worst_heads"]["by_outlier_fraction_max"] = sorted(
+        per_head_summary,
+        key=lambda item: (
+            item["outlier_fraction_med3"]["max"]
+            if item["outlier_fraction_med3"]["max"] is not None
+            else -1
+        ),
+        reverse=True,
+    )[:12]
+
+    drift_metrics = [
+        "vector_norm_p50",
+        "vector_norm_p95",
+        "tuple4_radius_p95",
+        "tuple4_radius_outlier_med3_fraction",
+        "radius_only_rel_l2_bits4",
+        "temporal_relative_delta_p95",
+    ]
+    drift_groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        drift_groups[(record.get("cache_kind"), record.get("layer_idx"), record.get("kv_role"))].append(record)
+
+    for (cache_kind, layer_idx, role), group in sorted(
+        drift_groups.items(), key=lambda item: tuple(str(part) for part in item[0])
+    ):
+        ordered = sorted(
+            [item for item in group if item.get("chunk_idx") is not None],
+            key=lambda item: int(item["chunk_idx"]),
+        )
+        for left, right in zip(ordered, ordered[1:], strict=False):
+            entry: dict[str, Any] = {
+                "cache_kind": cache_kind,
+                "layer_idx": layer_idx,
+                "kv_role": role,
+                "from_chunk": left.get("chunk_idx"),
+                "to_chunk": right.get("chunk_idx"),
+                "selected_chunk_gap": (
+                    int(right["chunk_idx"]) - int(left["chunk_idx"])
+                    if right.get("chunk_idx") is not None and left.get("chunk_idx") is not None
+                    else None
+                ),
+            }
+            for metric in drift_metrics:
+                right_value = _safe_float(right.get(metric))
+                left_value = _safe_float(left.get(metric))
+                entry[f"{metric}_delta"] = (
+                    _safe_float(right_value - left_value)
+                    if right_value is not None and left_value is not None
+                    else None
+                )
+                entry[f"{metric}_ratio"] = _ratio(right.get(metric), left.get(metric))
+            result["chunk_drift"].append(entry)
+
+    return result
+
+
+def _parse_int_list(value: str | None, available: Sequence[int], *, label: str) -> list[int]:
+    unique_available = sorted(set(int(item) for item in available))
+    if not unique_available:
+        raise ValueError(f"no available {label}s to select")
+    if value is None or value.lower() in {"auto", "auto3"}:
+        picks = [unique_available[0], unique_available[len(unique_available) // 2], unique_available[-1]]
+        return sorted(set(picks))
+    result = sorted({int(part.strip()) for part in value.split(",") if part.strip()})
+    missing = sorted(set(result) - set(unique_available))
+    if missing:
+        raise ValueError(f"requested {label}s are not available: {missing}")
+    return result
+
+
+def _parse_roles(value: str) -> list[str]:
+    aliases = {"k": "key", "key": "key", "v": "value", "value": "value"}
+    roles = []
+    for part in value.split(","):
+        key = part.strip().lower()
+        if not key:
+            continue
+        if key not in aliases:
+            raise ValueError(f"unsupported role {part!r}; expected key,value")
+        roles.append(aliases[key])
+    result = sorted(set(roles), key=roles.index)
+    if not result:
+        raise ValueError("at least one subset role is required")
+    return result
+
+
+def _context_for_subset_record(info: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "cache_kind": info.get("cache_kind"),
+        "layer_idx": info.get("layer_idx"),
+        "kv_role": info.get("kv_role"),
+        "layout": info.get("layout"),
+        "chunk_idx": info.get("chunk_idx"),
+        "cache_position": info.get("cache_position"),
+    }
+
+
+def create_subset_artifact(
+    artifact_path: str | Path,
+    output_path: str | Path,
+    *,
+    subset_layers: str | None = None,
+    subset_chunks: str | None = None,
+    subset_roles: str = "key,value",
+    subset_cache_kind: str = "self_attention",
+    max_subset_bytes: int = DEFAULT_MAX_SUBSET_BYTES,
+    trust_pickle: bool = True,
+) -> dict[str, Any]:
+    """Write a small tensor-only artifact that preserves source tensor paths."""
+
+    th = _ensure_torch()
+    artifact = Path(artifact_path).expanduser()
+    output = Path(output_path).expanduser()
+    stat = artifact.stat()
+
+    metadata_obj, metadata_load = _load_metadata_object(artifact, trust_pickle=trust_pickle)
+    collector = _collect(metadata_obj)
+    candidates = [
+        info
+        for info in collector.tensors
+        if info.get("cache_kind") == subset_cache_kind
+        and info.get("kv_role") in {"key", "value"}
+        and info.get("layout") in {"BHSD", "BSHD"}
+        and info.get("estimated_bytes") is not None
+        and info.get("chunk_idx") is not None
+    ]
+    layers = _parse_int_list(subset_layers, [int(info["layer_idx"]) for info in candidates], label="layer")
+    chunks = _parse_int_list(subset_chunks, [int(info["chunk_idx"]) for info in candidates], label="chunk")
+    roles = _parse_roles(subset_roles)
+
+    selected = [
+        info
+        for info in candidates
+        if info.get("layer_idx") in layers
+        and info.get("chunk_idx") in chunks
+        and info.get("kv_role") in roles
+    ]
+    selected = sorted(
+        selected,
+        key=lambda item: (
+            int(item.get("layer_idx") or -1),
+            str(item.get("kv_role") or ""),
+            int(item.get("chunk_idx") or -1),
+            str(item.get("path") or ""),
+        ),
+    )
+    selected_bytes = sum(int(info.get("estimated_bytes") or 0) for info in selected)
+    if not selected:
+        raise ValueError("subset selection matched no tensors")
+    if selected_bytes > max_subset_bytes:
+        raise ValueError(
+            f"subset estimated bytes {selected_bytes} exceeds max_subset_bytes {max_subset_bytes}"
+        )
+
+    full_obj, full_load = _load_full_object(artifact, trust_pickle=trust_pickle, prefer_mmap=True)
+    path_to_tensor: dict[str, Any] = {}
+
+    class TensorCollector(_Collector):
+        def visit_tensor(self, path: str, tensor: Any, context: dict[str, Any]) -> None:
+            path_to_tensor[path] = tensor
+
+    tensor_collector = TensorCollector()
+    _traverse(full_obj, path="", collector=tensor_collector)
+
+    records = []
+    for info in selected:
+        tensor = path_to_tensor.get(str(info["path"]))
+        if tensor is None:
+            raise RuntimeError(f"selected tensor missing after full load: {info['path']}")
+        records.append(
+            {
+                "source_path": info["path"],
+                "source_context": _context_for_subset_record(info),
+                "source_shape": info.get("shape"),
+                "source_dtype": info.get("dtype"),
+                "source_estimated_bytes": info.get("estimated_bytes"),
+                "tensor": tensor.detach().cpu().clone(),
+            }
+        )
+
+    subset_obj = {
+        "qvg_cache_audit_subset": {
+            "schema_version": "qvg-cache-audit-subset.v1",
+            "created_at": datetime.now(tz=timezone.utc).isoformat(),
+            "source_artifact": str(artifact.resolve()),
+            "source_size_bytes": stat.st_size,
+            "source_mtime_unix": stat.st_mtime,
+            "source_mtime_utc": _utc_iso(stat.st_mtime),
+            "metadata_load": metadata_load,
+            "stats_load": full_load,
+            "selection": {
+                "cache_kind": subset_cache_kind,
+                "layers": layers,
+                "roles": roles,
+                "chunks": chunks,
+            },
+            "byte_guards": {
+                "max_subset_bytes": max_subset_bytes,
+                "selected_estimated_bytes": selected_bytes,
+            },
+            "selected_tensor_count": len(records),
+            "selected_paths": [str(info["path"]) for info in selected],
+        },
+        "selected_tensors": records,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    th.save(subset_obj, str(output))
+    output_stat = output.stat()
+    manifest = _safe_jsonify(subset_obj["qvg_cache_audit_subset"])
+    manifest["output_path"] = str(output.resolve())
+    manifest["output_size_bytes"] = output_stat.st_size
+    return manifest
 
 
 def _mark_metadata_only(tensors: list[dict[str, Any]], reason: str) -> None:
@@ -905,6 +1392,7 @@ def audit_artifact(
         "cache_objects": [],
         "tensors": [],
         "layout_summary": {},
+        "stats_aggregates": {},
     }
 
     try:
@@ -933,6 +1421,7 @@ def audit_artifact(
         _mark_metadata_only(collector.tensors, reason)
         summary["load"]["status"] = "metadata_only"
         summary["layout_summary"] = _layout_summary(collector.tensors, collector.cache_objects)
+        summary["stats_aggregates"] = _stats_aggregates(collector.tensors)
         return summary
 
     try:
@@ -982,6 +1471,7 @@ def audit_artifact(
                     "layer_idx": full_info.get("layer_idx", info.get("layer_idx")),
                     "kv_role": full_info.get("kv_role", info.get("kv_role")),
                     "layout": full_info.get("layout", info.get("layout")),
+                    "chunk_idx": full_info.get("chunk_idx", info.get("chunk_idx")),
                     "cache_position": full_info.get("cache_position", info.get("cache_position")),
                     "packed_quantized_span": full_info.get(
                         "packed_quantized_span", info.get("packed_quantized_span")
@@ -996,6 +1486,7 @@ def audit_artifact(
 
     summary["load"]["status"] = "stats_computed"
     summary["layout_summary"] = _layout_summary(collector.tensors, collector.cache_objects)
+    summary["stats_aggregates"] = _stats_aggregates(collector.tensors)
     return summary
 
 
@@ -1010,6 +1501,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact", help="Path to a torch.save KV-cache artifact")
     parser.add_argument("-o", "--output", help="Write JSON summary to this path")
+    parser.add_argument(
+        "--make-subset",
+        help=(
+            "Write a bounded tensor-only subset artifact to this path, preserving "
+            "source tensor paths for later --stats-mode auto audits"
+        ),
+    )
+    parser.add_argument(
+        "--subset-layers",
+        default=None,
+        help="Comma-separated source layer indices for --make-subset, or auto/auto3 for first/middle/last",
+    )
+    parser.add_argument(
+        "--subset-chunks",
+        default=None,
+        help="Comma-separated source chunk indices for --make-subset, or auto/auto3 for first/middle/last",
+    )
+    parser.add_argument(
+        "--subset-roles",
+        default="key,value",
+        help="Comma-separated roles for --make-subset; accepts key,value or k,v",
+    )
+    parser.add_argument(
+        "--subset-cache-kind",
+        default="self_attention",
+        help="Cache kind for --make-subset selection, default self_attention",
+    )
+    parser.add_argument("--max-subset-bytes", type=_positive_int, default=DEFAULT_MAX_SUBSET_BYTES)
     parser.add_argument(
         "--stats-mode",
         choices=("auto", "metadata-only", "force"),
@@ -1040,6 +1559,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    if args.make_subset:
+        try:
+            manifest = create_subset_artifact(
+                args.artifact,
+                args.make_subset,
+                subset_layers=args.subset_layers,
+                subset_chunks=args.subset_chunks,
+                subset_roles=args.subset_roles,
+                subset_cache_kind=args.subset_cache_kind,
+                max_subset_bytes=args.max_subset_bytes,
+                trust_pickle=args.trust_pickle,
+            )
+        except Exception as exc:
+            print(json.dumps({"status": "subset_failed", "error": _truncate(repr(exc), 2000)}), file=sys.stderr)
+            return 2
+        text = json.dumps(manifest, indent=None if args.compact else 2, sort_keys=True, allow_nan=False)
+        if args.output:
+            output = Path(args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(text + "\n", encoding="utf-8")
+        else:
+            print(text)
+        return 0
+
     summary = audit_artifact(
         args.artifact,
         stats_mode=args.stats_mode,

@@ -11,6 +11,7 @@ logs/
 # Results & outputs
 results/
 outputs/
+staging/
 
 # Python
 __pycache__/
