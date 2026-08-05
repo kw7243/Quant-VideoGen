@@ -420,3 +420,26 @@ Decision: do not stage or submit a Slurm model smoke. The next branch is to
 provide or approve locating/linking the Self-Forcing DMD checkpoint and a
 complete Self-Forcing runtime environment, then run the smallest staged
 one-prompt fake-cache job through Slurm.
+
+## 2026-08-04 - Project layout and plan path standardized
+
+Firstmate moved the registered Quant-VideoGen project checkout under its canonical project home:
+
+```text
+/data/scratch-fast/kwen1/firstmate/projects/quant-videogen
+```
+
+The old scratch compatibility symlink was intentionally removed:
+
+```text
+/data/scratch-fast/kwen1/quant-videogen
+```
+
+The project plan was standardized to:
+
+```text
+plans/project-plan.md
+```
+
+The legacy `videogen_plan.md` path was intentionally removed in favor of the standardized plan path.
+Future Quant-VideoGen work should read `plans/project-plan.md` before scoping experiments and update this `notebook.md` with meaningful changes, outcomes, failed ideas, and decisions.
