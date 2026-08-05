@@ -723,3 +723,131 @@ Expand the subset only around the observed structure: layers 27-29, heads 0 and
 pre/post fake-HQMQ cache dump so direct cache quantization error and
 attention-output error can be measured before any video-quality or novelty
 claim.
+
+## 2026-08-05 - Attention-Error Probe Scaffold
+
+Task: build a targeted offline scaffold to test whether the bounded real-cache
+geometry predicts functional attention distortion. Work was done on branch
+`fm/qvg-attention-error-probe-scaffold` from cache-audit base `118e8ab`.
+
+HYPOTHESIS: K/V asymmetry, tuple4-radius structure, layer-29 K head-9 outlier
+behavior, and late-chunk drift may predict attention-level functional error.
+
+WHY THIS EXPERIMENT MATTERS: cache MSE and radius-only proxies are not enough
+to select a quantizer; attention logits, probabilities, output error, and
+top-token overlap are closer to model behavior.
+
+MANIPULATED VARIABLE: synthetic K-only and V-only cache perturbations.
+
+CONTROLLED VARIABLES: query tensors, current K/V tensors, token ordering,
+attention scale, and reference cached K/V tensors.
+
+PRIMARY METRIC: attention-output relative L2 error.
+
+SECONDARY METRICS: attention-logit relative L2, probability JS/KL/TV
+divergence, and top-attended-token overlap.
+
+EXPECTED RESULT: K perturbations change logits/probabilities/top tokens; V
+perturbations leave logits/probabilities unchanged but alter attention output.
+
+FALSIFYING RESULT: metrics fail to separate controlled K-only and V-only
+perturbations.
+
+DECISION RULE: proceed to real Self-Forcing capture only if synthetic tests
+detect both perturbation modes and the bounded subset smoke makes the real
+blockers explicit.
+
+Implementation:
+
+- Added `tools/attention_error_probe.py`, a standalone CPU-friendly offline
+  probe. It accepts supplied query/current-K/current-V tensors plus cached K/V
+  reference tensors and reconstructed cache variants, normalizes BHSD/BSHD
+  layouts, concatenates cached tokens before current tokens, and reports:
+  attention-logit error, attention-probability divergence, attention-output
+  relative error, and top-attended-token overlap.
+- Added `tools/attention_probe_capture.py`, an opt-in bounded capture-schema
+  helper for future Self-Forcing hooks. It is disabled by default, reads
+  `QVG_ATTENTION_PROBE_*` env vars, supports layer/head/chunk selection,
+  enforces `MAX_FILE_BYTES`, normalizes BSHD Self-Forcing tensors to BHSD, and
+  splits full attention K/V spans into cached and current tensors.
+- Added `tests/test_attention_error_probe.py` synthetic coverage for K-only
+  and V-only perturbations, probe-artifact loading, cache-audit smoke, and the
+  Self-Forcing capture schema.
+- Added `analysis/cache_audit_frames27_attention_probe_smoke.json`, a bounded
+  metadata/subset smoke derived from the existing bounded stats JSON.
+
+Bounded smoke command:
+
+```bash
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tools/attention_error_probe.py \
+  --cache-audit-summary analysis/cache_audit_frames27_bounded_stats.json \
+  --compact \
+  -o analysis/cache_audit_frames27_attention_probe_smoke.json
+```
+
+Smoke result:
+
+- The existing bounded subset remains usable for cache-only metadata, K/V
+  norm/radius summaries, per-head summaries, and selected chunk drift.
+- It cannot compute real attention-logit error, probability divergence,
+  attention-output relative error, or top-attended-token overlap because it
+  lacks query, current-K, current-V, attention-mask, and paired
+  BF16/reference-versus-reconstructed cache tensors.
+- The smoke read the committed bounded stats JSON only. I also `stat`-checked
+  the bounded subset and full dump paths; I did not broad-load the 7.86 GB full
+  dump or materialize the bounded PT subset in this branch.
+
+Recorded byte guards from the smoke:
+
+- Bounded subset path:
+  `/data/scratch-fast/kwen1/firstmate/data/qvg-bounded-cache-stats-analysis/cache_audit_frames27_subset.pt`.
+- Bounded subset size: `86271704` bytes.
+- Source full dump path:
+  `/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1213946/kv_dumps/kv_cache_frames27.pt`.
+- Source full dump size: `7858486627` bytes.
+- Subset creation guard: `max_subset_bytes=134217728`,
+  `selected_estimated_bytes=86261760`.
+- Stats guards: `max_full_load_bytes=134217728`,
+  `max_total_stat_bytes=134217728`, `max_tensor_stat_bytes=16777216`.
+
+Validation:
+
+```bash
+python3 -m py_compile tools/cache_audit.py tools/attention_error_probe.py \
+  tools/attention_probe_capture.py tests/test_cache_audit.py \
+  tests/test_attention_error_probe.py
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_attention_error_probe.py
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_cache_audit.py
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tools/attention_error_probe.py \
+  --cache-audit-summary analysis/cache_audit_frames27_bounded_stats.json \
+  --compact \
+  -o analysis/cache_audit_frames27_attention_probe_smoke.json
+git diff --check
+git diff --cached --check
+```
+
+All validation commands passed.
+
+Novelty guard:
+
+- Do not claim generic video-generation KV-cache quantization as novel.
+- Do not claim head-aware or static-vs-dynamic video cache compression as
+  novel.
+- Do not claim Jensen-bias correction for quantized video-diffusion keys as
+  novel.
+- This branch only scaffolds a narrower test: whether the observed
+  four-tuple/radius geometry, K/V asymmetry, layer-29 K head-9 outlier, and
+  late-chunk drift predict functional attention distortion in
+  Quant-VideoGen/Self-Forcing caches.
+
+No Slurm jobs, GPU inference runs, or modifications to job `1295590` were
+performed.
+
+Next experiment:
+
+Add the opt-in capture helper at
+`experiments/Self-Forcing/wan/modules/causal_model.py::CausalWanSelfAttention.attn_kv_cache_prerope`
+just before `attention(roped_query, k_input, v_all)`, pass `layer_idx` from the
+block loop, and run a bounded BF16/reference plus quantized/reconstructed
+paired capture around layers 27-29, heads 0 and 9, and chunks 24-26. Then feed
+the resulting probe artifacts into `tools/attention_error_probe.py`.
