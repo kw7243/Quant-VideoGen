@@ -776,3 +776,18 @@ NEXT EXPERIMENT:
 After job `1295590` completes, inspect Slurm state/exit code, stdout/stderr
 diagnostics, MP4 metadata/nonblank frames/contact sheet, KV dump metadata/size,
 and then decide the next smallest paired BF16/candidate or cache-audit run.
+
+Remote delivery status:
+
+- Remote repo: `https://github.com/kw7243/Quant-VideoGen.git`.
+- Remote name: `kw7243`.
+- Remote branch: `fm/qvg-med3x-smoke-resume-analysis`.
+- Pushed queued-state commit:
+  `8cfb03ea78d62a083e8dab38ab69748f57ee3f61`.
+- Upstream tracking:
+  `kw7243/fm/qvg-med3x-smoke-resume-analysis`.
+- Current Slurm status after push: job `1295590` is still `PENDING` on
+  `vision-torralba-h200`, reason `Priority`, `RunTime=00:00:00`,
+  `StartTime=Unknown`, requested `cpu=8,mem=96G,node=1,gres/gpu=1`.
+- No push was made to upstream `origin`, no local `main` merge was performed,
+  no PR was opened, and no additional smoke was submitted.
