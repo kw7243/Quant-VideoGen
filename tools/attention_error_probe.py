@@ -373,7 +373,11 @@ def _canonical_variant_tensor(
     return _canonical_bhsd(tensor, layout, name=key)
 
 
-def _iter_variants(record: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+def _iter_variants(
+    record: Mapping[str, Any],
+    *,
+    identity_variant_if_missing: bool = False,
+) -> list[tuple[str, Mapping[str, Any]]]:
     variants = record.get("variants")
     if isinstance(variants, Mapping):
         return [(str(name), item if isinstance(item, Mapping) else {"cached_key": item}) for name, item in variants.items()]
@@ -391,14 +395,33 @@ def _iter_variants(record: Mapping[str, Any]) -> list[tuple[str, Mapping[str, An
         ),
     }
     if fallback["cached_key"] is None and fallback["cached_value"] is None:
+        if identity_variant_if_missing:
+            return [
+                (
+                    "identity_reference",
+                    {
+                        "metadata": {
+                            "identity_variant": True,
+                            "note": "Reference tensors reused as the variant; this checks the offline attention path only.",
+                        }
+                    },
+                )
+            ]
         raise ValueError("probe record has no variants to compare")
     return [(str(record.get("variant_name", "variant")), fallback)]
 
 
-def probe_record(record: Mapping[str, Any], *, default_layout: str, top_k: int, eps: float) -> dict[str, Any]:
+def probe_record(
+    record: Mapping[str, Any],
+    *,
+    default_layout: str,
+    top_k: int,
+    eps: float,
+    identity_variant_if_missing: bool = False,
+) -> dict[str, Any]:
     canonical = _canonical_record_tensors(record, default_layout=default_layout)
     variants = []
-    for name, variant in _iter_variants(record):
+    for name, variant in _iter_variants(record, identity_variant_if_missing=identity_variant_if_missing):
         metrics = compute_attention_error_metrics(
             query=canonical["query"],
             current_key=canonical["current_key"],
@@ -467,6 +490,7 @@ def run_probe_artifact(
     eps: float = DEFAULT_EPS,
     record_limit: int | None = None,
     trust_pickle: bool = False,
+    identity_variant_if_missing: bool = False,
 ) -> dict[str, Any]:
     path = Path(input_path).expanduser()
     stat = path.stat()
@@ -490,8 +514,18 @@ def run_probe_artifact(
             "top_k": int(top_k),
             "eps": _safe_float(eps),
             "record_count": len(records),
+            "identity_variant_if_missing": bool(identity_variant_if_missing),
         },
-        "records": [probe_record(record, default_layout=default_layout, top_k=top_k, eps=eps) for record in records],
+        "records": [
+            probe_record(
+                record,
+                default_layout=default_layout,
+                top_k=top_k,
+                eps=eps,
+                identity_variant_if_missing=identity_variant_if_missing,
+            )
+            for record in records
+        ],
     }
 
 
@@ -618,6 +652,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow trusted-pickle torch.load for local probe artifacts; default is weights-only",
     )
+    parser.add_argument(
+        "--identity-variant-if-missing",
+        action="store_true",
+        help=(
+            "If a record has only reference tensors, compare it against itself. "
+            "This validates the offline attention path but does not measure quantized-cache distortion."
+        ),
+    )
     parser.add_argument("--compact", action="store_true", help="Emit compact JSON")
     return parser
 
@@ -636,6 +678,7 @@ def main(argv: list[str] | None = None) -> int:
                 eps=args.eps,
                 record_limit=args.record_limit,
                 trust_pickle=args.trust_pickle,
+                identity_variant_if_missing=args.identity_variant_if_missing,
             )
     except Exception as exc:
         print(json.dumps({"status": "attention_probe_failed", "error": repr(exc)}), file=sys.stderr)

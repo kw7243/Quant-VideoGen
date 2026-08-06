@@ -157,6 +157,37 @@ def test_probe_artifact_and_cache_audit_smoke(tmp_path):
     assert smoke["available_without_tensor_materialization"]["self_attention_cache_tensor_count"] == 18
 
 
+def test_probe_identity_variant_if_missing_for_reference_only_capture(tmp_path):
+    probe = _load_tool_module("attention_error_probe.py", "qvg_attention_error_probe_identity")
+    tensors = _attention_fixture()
+    artifact = tmp_path / "attention_probe_reference_only.pt"
+    torch.save(
+        {
+            "schema_version": probe.INPUT_SCHEMA_VERSION,
+            "records": [
+                {
+                    "name": "reference_only",
+                    "layout": "BHSD",
+                    "query": tensors["query"],
+                    "current_key": tensors["current_key"],
+                    "current_value": tensors["current_value"],
+                    "cached_key_ref": tensors["cached_key"],
+                    "cached_value_ref": tensors["cached_value"],
+                }
+            ],
+        },
+        artifact,
+    )
+
+    summary = probe.run_probe_artifact(artifact, top_k=1, identity_variant_if_missing=True)
+
+    variant = summary["records"][0]["variants"][0]
+    assert variant["name"] == "identity_reference"
+    assert variant["metrics"]["attention_logit_error"]["relative_l2"] == 0.0
+    assert variant["metrics"]["attention_output_relative_error"]["relative_l2"] == 0.0
+    assert summary["config"]["identity_variant_if_missing"] is True
+
+
 def test_self_forcing_capture_schema_is_bounded_and_bhsd(tmp_path):
     capture = _load_tool_module("attention_probe_capture.py", "qvg_attention_probe_capture")
     config = capture.CaptureConfig(
@@ -377,6 +408,7 @@ def test_capture_head_guard_cache_truncation_and_post_write_guard(tmp_path):
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmpdir:
         test_probe_artifact_and_cache_audit_smoke(Path(tmpdir))
+        test_probe_identity_variant_if_missing_for_reference_only_capture(Path(tmpdir))
         test_self_forcing_capture_schema_is_bounded_and_bhsd(Path(tmpdir))
         test_capture_env_defaults_and_overrides(Path(tmpdir))
         test_capture_selection_skip_and_chunk_slicing(Path(tmpdir))

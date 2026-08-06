@@ -1144,3 +1144,105 @@ capture manifest after terminal success:
 Job `1295590` was not modified, canceled, or used as a dependency. This
 submission is a distinct BF16/reference attention-capture job, not the pending
 Med3x smoke continuation.
+
+## 2026-08-06 - Attention-Capture Postprocess Readiness Check
+
+Task: build the CPU-only post-capture readiness scaffold for pending
+Self-Forcing attention-capture Slurm job `1316140`, starting from
+`kw7243/fm/qvg-attention-capture-slurm-run` on branch
+`fm/qvg-attention-capture-postprocess-check`.
+
+HYPOTHESIS: a metadata-only readiness command can make the pending or completed
+state of job `1316140` artifacts auditable without querying Slurm, loading
+large tensor payloads, or conflating reference-only captures with quantized
+functional distortion.
+
+WHY THIS EXPERIMENT MATTERS: the next scientific question is narrow: whether
+the observed Self-Forcing/QVG cache geometry predicts functional attention
+distortion in actual captured attention calls. A readiness gate prevents absent
+or partial Slurm artifacts from becoming ambiguous failures.
+
+MANIPULATED VARIABLE: synthetic fixture artifact state for the scaffold tests
+and the live presence or absence of task-local job `1316140` files.
+
+CONTROLLED VARIABLES: expected job id, BF16/reference `quant_type=none`,
+layers `27,28,29`, heads `0,9`, chunks `24,25,26`, and the 64 MiB per-capture
+file guard.
+
+PRIMARY METRIC: machine-readable `ready`/`not_ready` state from
+`tools/attention_capture_readiness.py`.
+
+SECONDARY METRICS: validated submission metadata, log paths, output directory,
+capture directory, capture manifest schema, capture file sizes, layer/head/chunk
+coverage, and generated next `tools/attention_error_probe.py` command.
+
+EXPECTED RESULT: pending job artifacts report `not_ready` with explicit missing
+paths; completed reference-only captures emit an identity-reference attention
+self-check command; variant-bearing captures emit a distortion-probe command.
+
+FALSIFYING RESULT: missing or pending artifacts crash the checker, or completed
+captures can produce a command that broad-loads tensors before byte guards and
+manifest checks pass.
+
+DECISION RULE: use this scaffold as the CPU gate after job `1316140` completes;
+interpret identity-reference output only as an offline attention-path sanity
+check, not as quantization distortion evidence.
+
+Implementation:
+
+- Added `tools/attention_capture_readiness.py`, a stdlib-only metadata checker
+  for job `1316140`. It reads task-local submission JSON, expected stdout and
+  stderr logs, output and capture directories, the capture manifest, selected
+  layers/heads/chunks, and capture file byte guards. It does not query or
+  control Slurm and does not load `.pt` tensors.
+- Extended `tools/attention_error_probe.py` with opt-in
+  `--identity-variant-if-missing`. This lets a completed BF16/reference-only
+  capture run the smallest offline attention self-check. It is explicitly not
+  a quantized-cache distortion measurement.
+- Added `tests/test_attention_capture_readiness.py` with synthetic pending,
+  complete reference-only, complete variant-bearing, oversized capture, and
+  selection-mismatch fixtures.
+- Added synthetic coverage in `tests/test_attention_error_probe.py` for the
+  identity-reference mode.
+
+Live job `1316140` readiness command:
+
+```bash
+python3 tools/attention_capture_readiness.py --compact \
+  -o /data/scratch-fast/kwen1/firstmate/data/qvg-attention-capture-postprocess-check/readiness_1316140.json
+```
+
+Live result:
+
+- `status=not_ready`.
+- Submission metadata exists and matches job `1316140`.
+- Attention probe metadata matches expected layers `27,28,29`, heads `0,9`,
+  chunks `24,25,26`, and `max_file_bytes=67108864`.
+- Preflight files from the staged submission are present.
+- Missing pending artifacts: stdout log, stderr log, output directory, capture
+  directory, and capture manifest.
+- No `tools/attention_error_probe.py` command is emitted until capture artifacts
+  are present and pass manifest/byte-guard checks.
+
+Validation:
+
+```bash
+python3 -m py_compile tools/attention_capture_readiness.py \
+  tools/attention_error_probe.py tests/test_attention_capture_readiness.py \
+  tests/test_attention_error_probe.py
+python3 tests/test_attention_capture_readiness.py
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_attention_error_probe.py
+python3 tools/attention_capture_readiness.py --compact \
+  -o /data/scratch-fast/kwen1/firstmate/data/qvg-attention-capture-postprocess-check/readiness_1316140.json
+git diff --check
+```
+
+All commands passed.
+
+Novelty guard:
+
+- No claim is made about video quality, memory reduction, latency, or generic
+  autoregressive video-generation KV-cache quantization.
+- The scaffold supports only readiness for testing whether the observed local
+  cache geometry predicts functional attention distortion in actual
+  Self-Forcing attention calls.
