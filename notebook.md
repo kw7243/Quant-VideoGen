@@ -851,3 +851,160 @@ just before `attention(roped_query, k_input, v_all)`, pass `layer_idx` from the
 block loop, and run a bounded BF16/reference plus quantized/reconstructed
 paired capture around layers 27-29, heads 0 and 9, and chunks 24-26. Then feed
 the resulting probe artifacts into `tools/attention_error_probe.py`.
+
+## 2026-08-05 - Self-Forcing Attention Capture Hook
+
+Task: hook the opt-in attention-probe capture scaffold into the real
+Self-Forcing cached-attention path without launching GPU inference or touching
+the separate Med3x Slurm job `1295590`.
+
+HYPOTHESIS: the locally observed Self-Forcing/QVG cache geometry, especially
+K/V asymmetry, layer-29 K head-9 outliers, late-chunk drift, and HQMQ/Med3x
+radius structure, may predict functional attention distortion for the actual
+cached-versus-current attention call.
+
+WHY THIS EXPERIMENT MATTERS: a bounded real attention-call capture is the
+smallest missing input needed before `tools/attention_error_probe.py` can test
+logit, probability, top-token, and output distortion instead of only cache
+statistics.
+
+MANIPULATED VARIABLE: no model variable was manipulated in this branch. The
+code adds an opt-in capture surface for later BF16 and quantized/reconstructed
+paired runs.
+
+CONTROLLED VARIABLES: default inference remains unchanged when
+`QVG_ATTENTION_PROBE_ENABLED` is unset. Enabled capture defaults to layers
+`27,28,29`, heads `0,9`, and chunks `24,25,26`, with a 64 MiB per-file byte
+guard.
+
+PRIMARY METRIC: future attention-output relative L2 from
+`tools/attention_error_probe.py`.
+
+SECONDARY METRICS: future attention-logit relative L2, probability divergence,
+and top-attended-token overlap.
+
+EXPECTED RESULT: if the cache geometry is functionally meaningful, bounded
+captures around layers 27-29 and chunks 24-26 should show larger attention
+distortion for the sensitive K/head/chunk regions than for nearby controls.
+
+FALSIFYING RESULT: paired captures show no meaningful attention distortion
+despite the observed K/V geometry, or distortion does not align with layer/head
+or late-chunk structure.
+
+DECISION RULE: only use this evidence to motivate a narrow attention-aware
+follow-up if paired captures make the functional metrics computable and the
+effect localizes to the predicted regions.
+
+Implementation:
+
+- Added a lazy Self-Forcing hook immediately before
+  `attention(roped_query, k_input, v_all)` in
+  `experiments/Self-Forcing/wan/modules/causal_model.py::CausalWanSelfAttention.attn_kv_cache_prerope`.
+- Passed stable `layer_idx=block_index` from
+  `CausalWanModel._forward_inference` through `CausalWanAttentionBlock.forward`
+  and `CausalWanSelfAttention.forward` into the hook. The only fallback is
+  `layer_idx=-1` for direct module calls outside the model block loop; default
+  layer selection skips that fallback.
+- Kept capture opt-in through environment variables. With
+  `QVG_ATTENTION_PROBE_ENABLED` unset, the capture module is not imported and
+  no files are written.
+- Updated `tools/attention_probe_capture.py` so enabled capture defaults to the
+  bounded first target: layers `27,28,29`, heads `0,9`, chunks `24,25,26`.
+  `LAYERS=all`, `HEADS=all`, or `CHUNKS=all` remain available only for
+  deliberate debug captures.
+- Changed bounded chunk selection so cached and current tensors contain only
+  selected chunk spans from the full attention call. Metadata records full
+  token counts, selected token counts, selected heads/chunks, cached/current
+  chunk indices, dropped prefix tokens, and cache chunk states.
+- Captured tensors are the roped query, roped all-key span split into cached
+  and current K, V span split into cached and current V, plus optional unroped
+  query/key diagnostics. If cache chunks are quantized spans, metadata records
+  that `kv_cache.read()` returned reconstructed tensors for those chunks.
+- Added CPU coverage for env parsing, default bounded selection, disabled and
+  mismatch skip paths, selected chunk slicing, invalid head selection,
+  `MAX_CACHE_TOKENS` truncation, and both byte-guard branches.
+
+Validation commands:
+
+```bash
+python3 -m py_compile tools/cache_audit.py tools/attention_error_probe.py \
+  tools/attention_probe_capture.py tests/test_cache_audit.py \
+  tests/test_attention_error_probe.py \
+  experiments/Self-Forcing/wan/modules/causal_model.py
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_attention_error_probe.py
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_cache_audit.py
+mkdir -p /data/scratch-fast/kwen1/firstmate/data/qvg-self-forcing-attention-capture-hook
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tools/attention_error_probe.py \
+  --cache-audit-summary analysis/cache_audit_frames27_bounded_stats.json \
+  --compact \
+  -o /data/scratch-fast/kwen1/firstmate/data/qvg-self-forcing-attention-capture-hook/attention_probe_smoke.json
+git diff --check
+```
+
+All commands passed. The smoke JSON is:
+
+```text
+/data/scratch-fast/kwen1/firstmate/data/qvg-self-forcing-attention-capture-hook/attention_probe_smoke.json
+size: 2006 bytes
+```
+
+No runtime attention capture artifact was produced in this branch, so no model
+inference and no Slurm job were run. Job `1295590` was not inspected, canceled,
+modified, or duplicated. Since no capture artifact exists yet, functional
+attention metrics are still not computable.
+
+Byte guards:
+
+- Capture default `QVG_ATTENTION_PROBE_MAX_FILE_BYTES`: `67108864`.
+- Cache-audit smoke reused the bounded stats JSON only and did not load the
+  7.86 GB cache dump.
+- Existing bounded stats guards remain `max_full_load_bytes=134217728`,
+  `max_total_stat_bytes=134217728`, and `max_tensor_stat_bytes=16777216`.
+
+Failed or deliberately skipped ideas:
+
+- Did not add global mutable layer counters; the hook uses the local block-loop
+  index.
+- Did not capture all cache tokens by default. The enabled default is the
+  bounded layers/heads/chunks target.
+- Did not attempt to synthesize paired BF16-versus-quantized variants inside
+  one attention call when the reference cache is not present. Quantized or
+  reconstructed cache semantics are recorded in metadata, and paired functional
+  comparison still needs a matched BF16/reference capture.
+- Did not submit a Slurm capture because the hook and guards were validated
+  with CPU tests, and the next GPU run should be a distinct bounded capture
+  job only after operator approval.
+
+Novelty guard:
+
+- Do not claim generic autoregressive video-generation KV-cache quantization as
+  novel.
+- Do not claim video-diffusion key quantization bias correction as novel.
+- Do not claim salience-based video KV-cache policies as novel.
+- Do not claim broad frame-wise sensitivity or outlier-aware ARVD
+  quantization as novel.
+- Do not claim VideoLLM sub-2-bit mixed-precision KV-cache quantization as
+  novel.
+- This branch supports only a narrow infrastructure claim: the project can now
+  capture bounded Self-Forcing attention-call tensors needed to test whether
+  the already observed local cache geometry predicts functional attention
+  distortion.
+
+Next smallest experiment:
+
+Run one staged, distinct, bounded Self-Forcing attention-capture job with:
+
+```bash
+QVG_ATTENTION_PROBE_ENABLED=1
+QVG_ATTENTION_PROBE_DIR=/data/scratch-fast/kwen1/firstmate/data/qvg-self-forcing-attention-capture-hook/captures
+QVG_ATTENTION_PROBE_LAYERS=27,28,29
+QVG_ATTENTION_PROBE_HEADS=0,9
+QVG_ATTENTION_PROBE_CHUNKS=24,25,26
+QVG_ATTENTION_PROBE_MAX_FILE_BYTES=67108864
+QVG_ATTENTION_PROBE_VARIANT=bf16_or_quantized_run_label
+```
+
+Use the research reproducibility staging helper, do Slurm preflight first, and
+do not duplicate the pending Med3x smoke. After the bounded artifacts exist and
+remain under the byte guard, run `tools/attention_error_probe.py --input` on the
+paired probe artifact or on a small merged BF16/reference-plus-variant artifact.

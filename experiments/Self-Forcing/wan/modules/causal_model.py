@@ -17,12 +17,108 @@ import torch.nn as nn
 import torch
 import math
 import torch.distributed as dist
+import os
 
 # wan 1.3B model has a weird channel / head configurations and require max-autotune to work with flexattention
 # see https://github.com/pytorch/pytorch/issues/133254
 # change to default for other models
 flex_attention = torch.compile(
     flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
+
+
+def _attention_probe_env_enabled():
+    value = os.getenv("QVG_ATTENTION_PROBE_ENABLED")
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _attention_probe_cache_metadata(cache, *, frame_seq_length, local_end_index, selected_chunks):
+    states = getattr(cache, "chunk_state", None)
+    max_chunks = int(math.ceil(local_end_index / frame_seq_length)) if frame_seq_length else 0
+    if selected_chunks is None:
+        chunk_indices = list(range(max_chunks))
+    else:
+        chunk_indices = [int(idx) for idx in sorted(selected_chunks) if 0 <= int(idx) < max_chunks]
+
+    chunk_states = {}
+    if states is not None:
+        for chunk_idx in chunk_indices:
+            state = states[chunk_idx]
+            chunk_states[str(chunk_idx)] = getattr(state, "name", str(state))
+
+    quantized_spans = []
+    for span in getattr(cache, "quantized_spans", []):
+        quantized_spans.append({
+            "start_chunk": int(span.get("start_chunk", -1)),
+            "end_chunk": int(span.get("end_chunk", -1)),
+            "has_quant_data": "quant_data" in span,
+        })
+
+    return {
+        "layout": getattr(cache, "layout", None),
+        "selected_chunk_states": chunk_states,
+        "quantized_spans": quantized_spans,
+        "read_tensor_semantics": (
+            "kv_cache.read() returns BF16 chunks directly and reconstructed tensors "
+            "for chunks stored as quantized spans."
+        ),
+    }
+
+
+def _maybe_write_attention_probe_capture(
+    *,
+    layer_idx,
+    current_start,
+    local_start_index,
+    local_end_index,
+    frame_seq_length,
+    roped_query,
+    k_input,
+    v_all,
+    q,
+    k_all,
+    kv_cache,
+    grid_sizes,
+    seq_lens,
+):
+    if not _attention_probe_env_enabled():
+        return None
+
+    from tools.attention_probe_capture import CaptureConfig, write_self_forcing_probe_capture
+
+    config = CaptureConfig.from_env()
+    stable_layer_idx = int(layer_idx) if layer_idx is not None else -1
+    layer_idx_source = "CausalWanModel._forward_inference block_index" if layer_idx is not None else "missing"
+    metadata = {
+        "layer_idx_source": layer_idx_source,
+        "cache_key": _attention_probe_cache_metadata(
+            kv_cache["k"],
+            frame_seq_length=frame_seq_length,
+            local_end_index=local_end_index,
+            selected_chunks=config.chunks,
+        ),
+        "cache_value": _attention_probe_cache_metadata(
+            kv_cache["v"],
+            frame_seq_length=frame_seq_length,
+            local_end_index=local_end_index,
+            selected_chunks=config.chunks,
+        ),
+    }
+    return write_self_forcing_probe_capture(
+        layer_idx=stable_layer_idx,
+        current_start=current_start,
+        local_start_index=local_start_index,
+        local_end_index=local_end_index,
+        frame_seq_length=frame_seq_length,
+        query_rope_bshd=roped_query,
+        key_all_rope_bshd=k_input,
+        value_all_bshd=v_all,
+        config=config,
+        query_unrope_bshd=q,
+        key_all_unrope_bshd=k_all,
+        grid_sizes=grid_sizes,
+        seq_lens=seq_lens,
+        metadata=metadata,
+    )
 
 
 def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
@@ -269,7 +365,20 @@ class CausalWanSelfAttention(nn.Module):
         return x, kv_cache
 
     
-    def attn_kv_cache_prerope(self, kv_cache, current_start, q, k, v, block_mask, grid_sizes, freqs, seq_lens, s):
+    def attn_kv_cache_prerope(
+        self,
+        kv_cache,
+        current_start,
+        q,
+        k,
+        v,
+        block_mask,
+        grid_sizes,
+        freqs,
+        seq_lens,
+        s,
+        layer_idx=None,
+    ):
         """
         To facilitate this, KV cache should always stay with in the kv cache size.
         """
@@ -305,6 +414,21 @@ class CausalWanSelfAttention(nn.Module):
             k_all, grid_sizes, freqs
         ).type_as(v)
 
+        _maybe_write_attention_probe_capture(
+            layer_idx=layer_idx,
+            current_start=current_start,
+            local_start_index=local_start_index,
+            local_end_index=local_end_index,
+            frame_seq_length=frame_seqlen,
+            roped_query=roped_query,
+            k_input=k_input,
+            v_all=v_all,
+            q=q,
+            k_all=k_all,
+            kv_cache=kv_cache,
+            grid_sizes=grid_sizes,
+            seq_lens=seq_lens,
+        )
         x = attention(roped_query, k_input, v_all)
         
         kv_cache["global_end_index"].fill_(current_end)
@@ -322,7 +446,8 @@ class CausalWanSelfAttention(nn.Module):
         block_mask,
         kv_cache=None,
         current_start=0,
-        cache_start=None
+        cache_start=None,
+        layer_idx=None,
     ):
         r"""
         Args:
@@ -349,7 +474,9 @@ class CausalWanSelfAttention(nn.Module):
             x = self.attn_kv_cache_is_none(q, k, v, block_mask, grid_sizes, freqs, seq_lens, s)
         else:
             # x, kv_cache = self.attn_kv_cache(kv_cache, current_start, q, k, v, block_mask, grid_sizes, freqs, seq_lens, s)
-            x, kv_cache = self.attn_kv_cache_prerope(kv_cache, current_start, q, k, v, block_mask, grid_sizes, freqs, seq_lens, s)
+            x, kv_cache = self.attn_kv_cache_prerope(
+                kv_cache, current_start, q, k, v, block_mask, grid_sizes, freqs, seq_lens, s, layer_idx
+            )
             
         # output
         x = x.flatten(2)
@@ -410,7 +537,8 @@ class CausalWanAttentionBlock(nn.Module):
         kv_cache=None,
         crossattn_cache=None,
         current_start=0,
-        cache_start=None
+        cache_start=None,
+        layer_idx=None,
     ):
         r"""
         Args:
@@ -427,7 +555,7 @@ class CausalWanAttentionBlock(nn.Module):
         y = self.self_attn(
             (self.norm1(x).unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * (1 + e[1]) + e[0]).flatten(1, 2),
             seq_lens, grid_sizes,
-            freqs, block_mask, kv_cache, current_start, cache_start)
+            freqs, block_mask, kv_cache, current_start, cache_start, layer_idx)
 
         x = x + (y.unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * e[2]).flatten(1, 2)
 
@@ -926,7 +1054,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     {
                         "kv_cache": kv_cache[block_index],
                         "current_start": current_start,
-                        "cache_start": cache_start
+                        "cache_start": cache_start,
+                        "layer_idx": block_index,
                     }
                 )
                 x = torch.utils.checkpoint.checkpoint(
@@ -940,7 +1069,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                         "kv_cache": kv_cache[block_index],
                         "crossattn_cache": crossattn_cache[block_index],
                         "current_start": current_start,
-                        "cache_start": cache_start
+                        "cache_start": cache_start,
+                        "layer_idx": block_index,
                     }
                 )
                 x = block(x, **kwargs)

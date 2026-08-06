@@ -28,6 +28,9 @@ CAPTURE_SCHEMA_VERSION = "qvg-attention-probe-capture.v1"
 PROBE_INPUT_SCHEMA_VERSION = "qvg-attention-probe-input.v1"
 DEFAULT_ENV_PREFIX = "QVG_ATTENTION_PROBE"
 DEFAULT_MAX_FILE_BYTES = 64 * 1024**2
+DEFAULT_LAYERS = frozenset({27, 28, 29})
+DEFAULT_HEADS = frozenset({0, 9})
+DEFAULT_CHUNKS = frozenset({24, 25, 26})
 
 
 def _ensure_torch() -> Any:
@@ -44,6 +47,12 @@ def _parse_int_set(value: str | None) -> set[int] | None:
     if value is None or value.strip() == "" or value.strip().lower() in {"*", "all"}:
         return None
     return {int(part.strip()) for part in value.split(",") if part.strip()}
+
+
+def _parse_int_set_or_default(value: str | None, default: Iterable[int]) -> set[int] | None:
+    if value is None:
+        return set(default)
+    return _parse_int_set(value)
 
 
 def _parse_bool(value: str | None, *, default: bool = False) -> bool:
@@ -90,7 +99,9 @@ class CaptureConfig:
 
     - ``ENABLED=1`` turns capture on.
     - ``DIR=/path`` chooses the output directory.
-    - ``LAYERS=27,28,29``, ``HEADS=0,9``, ``CHUNKS=24,25,26`` bound selection.
+    - ``LAYERS=27,28,29``, ``HEADS=0,9``, ``CHUNKS=24,25,26`` bound
+      selection. These are also the enabled-capture defaults; use ``all`` only
+      for a deliberate unbounded debug capture.
     - ``MAX_FILE_BYTES`` rejects oversized records before writing.
     - ``MAX_CACHE_TOKENS`` optionally truncates cached context to the latest N
       tokens. Leave unset for exact full-context attention probes.
@@ -113,9 +124,9 @@ class CaptureConfig:
         return cls(
             enabled=_parse_bool(os.getenv(f"{prefix}_ENABLED"), default=False),
             output_dir=output_dir,
-            layers=_parse_int_set(os.getenv(f"{prefix}_LAYERS")),
-            heads=_parse_int_set(os.getenv(f"{prefix}_HEADS")),
-            chunks=_parse_int_set(os.getenv(f"{prefix}_CHUNKS")),
+            layers=_parse_int_set_or_default(os.getenv(f"{prefix}_LAYERS"), DEFAULT_LAYERS),
+            heads=_parse_int_set_or_default(os.getenv(f"{prefix}_HEADS"), DEFAULT_HEADS),
+            chunks=_parse_int_set_or_default(os.getenv(f"{prefix}_CHUNKS"), DEFAULT_CHUNKS),
             max_file_bytes=int(os.getenv(f"{prefix}_MAX_FILE_BYTES", str(DEFAULT_MAX_FILE_BYTES))),
             max_cache_tokens=max_cache_tokens,
             variant_name=os.getenv(f"{prefix}_VARIANT", "capture"),
@@ -158,11 +169,60 @@ def _select_heads(tensor: Any, heads: set[int] | None) -> Any:
     return tensor.index_select(1, index)
 
 
+def _valid_heads(tensor: Any, heads: set[int] | None) -> list[int] | str:
+    if heads is None:
+        return "all"
+    return sorted(head for head in heads if 0 <= head < int(tensor.shape[1]))
+
+
 def _tail_tokens(tensor: Any, max_tokens: int | None) -> tuple[Any, int]:
     if max_tokens is None or tensor.shape[2] <= max_tokens:
         return tensor, 0
     start = int(tensor.shape[2] - max_tokens)
     return tensor[:, :, start:, :].contiguous(), start
+
+
+def _chunk_intervals_for_span(
+    *,
+    span_start: int,
+    span_end: int,
+    frame_seq_length: int,
+    chunks: set[int] | None,
+) -> list[tuple[int, int, int]]:
+    if chunks is None:
+        return [(span_start, span_end, -1)] if span_end > span_start else []
+
+    intervals = []
+    for chunk_idx in sorted(chunks):
+        chunk_start = chunk_idx * frame_seq_length
+        chunk_end = chunk_start + frame_seq_length
+        start = max(span_start, chunk_start)
+        end = min(span_end, chunk_end)
+        if end > start:
+            intervals.append((start, end, chunk_idx))
+    return intervals
+
+
+def _select_chunk_tokens(
+    tensor: Any,
+    *,
+    span_start: int,
+    span_end: int,
+    frame_seq_length: int,
+    chunks: set[int] | None,
+) -> tuple[Any, list[int] | str]:
+    intervals = _chunk_intervals_for_span(
+        span_start=span_start,
+        span_end=span_end,
+        frame_seq_length=frame_seq_length,
+        chunks=chunks,
+    )
+    if chunks is None:
+        return tensor[:, :, span_start:span_end, :].contiguous(), "all"
+    if not intervals:
+        return tensor[:, :, 0:0, :].contiguous(), []
+    parts = [tensor[:, :, start:end, :] for start, end, _chunk_idx in intervals]
+    return torch.cat(parts, dim=2).contiguous(), [chunk_idx for _start, _end, chunk_idx in intervals]  # type: ignore[union-attr]
 
 
 def _record_tensor_bytes(record: Mapping[str, Any]) -> int:
@@ -207,7 +267,9 @@ def build_self_forcing_probe_record(
 
     cfg = config or CaptureConfig()
     current_chunk_idx = current_start // frame_seq_length
-    q = _select_heads(canonical_bhsd(query_rope_bshd, layout="BSHD"), cfg.heads)
+    q_all_heads = canonical_bhsd(query_rope_bshd, layout="BSHD")
+    selected_heads = _valid_heads(q_all_heads, cfg.heads)
+    q = _select_heads(q_all_heads, cfg.heads)
     key_all = _select_heads(canonical_bhsd(key_all_rope_bshd, layout="BSHD"), cfg.heads)
     value_all = _select_heads(canonical_bhsd(value_all_bshd, layout="BSHD"), cfg.heads)
 
@@ -217,10 +279,38 @@ def build_self_forcing_probe_record(
             f"local_end_index={local_end_index}, key_tokens={key_all.shape[2]}, value_tokens={value_all.shape[2]}"
         )
 
-    cached_key = key_all[:, :, :local_start_index, :].contiguous()
-    cached_value = value_all[:, :, :local_start_index, :].contiguous()
-    current_key = key_all[:, :, local_start_index:local_end_index, :].contiguous()
-    current_value = value_all[:, :, local_start_index:local_end_index, :].contiguous()
+    cached_key, cached_chunk_indices = _select_chunk_tokens(
+        key_all,
+        span_start=0,
+        span_end=local_start_index,
+        frame_seq_length=frame_seq_length,
+        chunks=cfg.chunks,
+    )
+    cached_value, cached_value_chunk_indices = _select_chunk_tokens(
+        value_all,
+        span_start=0,
+        span_end=local_start_index,
+        frame_seq_length=frame_seq_length,
+        chunks=cfg.chunks,
+    )
+    current_key, current_chunk_indices = _select_chunk_tokens(
+        key_all,
+        span_start=local_start_index,
+        span_end=local_end_index,
+        frame_seq_length=frame_seq_length,
+        chunks=cfg.chunks,
+    )
+    current_value, current_value_chunk_indices = _select_chunk_tokens(
+        value_all,
+        span_start=local_start_index,
+        span_end=local_end_index,
+        frame_seq_length=frame_seq_length,
+        chunks=cfg.chunks,
+    )
+    if cached_chunk_indices != cached_value_chunk_indices:
+        raise RuntimeError("cached K/V chunk selection mismatch")
+    if current_chunk_indices != current_value_chunk_indices:
+        raise RuntimeError("current K/V chunk selection mismatch")
     cached_key, dropped_cache_tokens = _tail_tokens(cached_key, cfg.max_cache_tokens)
     cached_value, dropped_value_tokens = _tail_tokens(cached_value, cfg.max_cache_tokens)
     if dropped_cache_tokens != dropped_value_tokens:
@@ -231,8 +321,22 @@ def build_self_forcing_probe_record(
         diagnostics["query_unrope_bhsd"] = _select_heads(canonical_bhsd(query_unrope_bshd, layout="BSHD"), cfg.heads)
     if key_all_unrope_bshd is not None:
         key_unrope = _select_heads(canonical_bhsd(key_all_unrope_bshd, layout="BSHD"), cfg.heads)
-        diagnostics["cached_key_unrope_bhsd"] = key_unrope[:, :, dropped_cache_tokens:local_start_index, :].contiguous()
-        diagnostics["current_key_unrope_bhsd"] = key_unrope[:, :, local_start_index:local_end_index, :].contiguous()
+        cached_key_unrope, _cached_unrope_chunks = _select_chunk_tokens(
+            key_unrope,
+            span_start=0,
+            span_end=local_start_index,
+            frame_seq_length=frame_seq_length,
+            chunks=cfg.chunks,
+        )
+        current_key_unrope, _current_unrope_chunks = _select_chunk_tokens(
+            key_unrope,
+            span_start=local_start_index,
+            span_end=local_end_index,
+            frame_seq_length=frame_seq_length,
+            chunks=cfg.chunks,
+        )
+        diagnostics["cached_key_unrope_bhsd"] = cached_key_unrope[:, :, dropped_cache_tokens:, :].contiguous()
+        diagnostics["current_key_unrope_bhsd"] = current_key_unrope
 
     return {
         "name": f"layer_{layer_idx}_chunk_{current_chunk_idx}",
@@ -251,8 +355,19 @@ def build_self_forcing_probe_record(
             "local_start_index": int(local_start_index),
             "local_end_index": int(local_end_index),
             "frame_seq_length": int(frame_seq_length),
+            "full_cached_tokens_before_selection": int(local_start_index),
+            "full_current_tokens_before_selection": int(local_end_index - local_start_index),
+            "selected_cached_tokens": int(cached_key.shape[2]),
+            "selected_current_tokens": int(current_key.shape[2]),
             "dropped_prefix_cache_tokens": int(dropped_cache_tokens),
-            "selected_heads": sorted(cfg.heads) if cfg.heads is not None else "all",
+            "selected_heads": selected_heads,
+            "selected_chunks": sorted(cfg.chunks) if cfg.chunks is not None else "all",
+            "cached_chunk_indices": cached_chunk_indices,
+            "current_chunk_indices": current_chunk_indices,
+            "chunk_selection_note": (
+                "When QVG_ATTENTION_PROBE_CHUNKS is bounded, cached/current tensors contain only "
+                "the selected chunk spans from the full attention call."
+            ),
             "variant_name": cfg.variant_name,
             "grid_sizes": _safe_jsonify(grid_sizes),
             "seq_lens": _safe_jsonify(seq_lens),

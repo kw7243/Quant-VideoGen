@@ -1,11 +1,33 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import tempfile
 
 import torch
+
+
+class _patched_environ:
+    def __init__(self, updates: dict[str, str | None]):
+        self.updates = updates
+        self.previous: dict[str, str | None] = {}
+
+    def __enter__(self):
+        for key, value in self.updates.items():
+            self.previous[key] = os.environ.get(key)
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        for key, value in self.previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _load_tool_module(filename: str, module_name: str):
@@ -142,7 +164,7 @@ def test_self_forcing_capture_schema_is_bounded_and_bhsd(tmp_path):
         output_dir=tmp_path,
         layers={29},
         heads={1},
-        chunks={2},
+        chunks=None,
         max_file_bytes=1024 * 1024,
         variant_name="bf16",
     )
@@ -168,6 +190,7 @@ def test_self_forcing_capture_schema_is_bounded_and_bhsd(tmp_path):
     assert record["cached_key_ref"].shape == (1, 1, 3, 4)
     assert record["current_key"].shape == (1, 1, 2, 4)
     assert record["metadata"]["selected_heads"] == [1]
+    assert record["metadata"]["selected_chunks"] == "all"
 
     manifest = capture.write_self_forcing_probe_capture(
         layer_idx=29,
@@ -188,7 +211,7 @@ def test_self_forcing_capture_schema_is_bounded_and_bhsd(tmp_path):
         output_dir=tmp_path,
         layers={29},
         heads={1},
-        chunks={2},
+        chunks=None,
         max_file_bytes=1,
     )
     skipped = capture.write_self_forcing_probe_capture(
@@ -205,9 +228,158 @@ def test_self_forcing_capture_schema_is_bounded_and_bhsd(tmp_path):
     assert skipped["status"] == "skipped_byte_guard"
 
 
+def test_capture_env_defaults_and_overrides(tmp_path):
+    capture = _load_tool_module("attention_probe_capture.py", "qvg_attention_probe_capture_env")
+    keys = {
+        "QVG_ATTENTION_PROBE_ENABLED": "1",
+        "QVG_ATTENTION_PROBE_DIR": str(tmp_path),
+        "QVG_ATTENTION_PROBE_MAX_FILE_BYTES": "12345",
+        "QVG_ATTENTION_PROBE_MAX_CACHE_TOKENS": "7",
+        "QVG_ATTENTION_PROBE_VARIANT": "hqmq-fake",
+        "QVG_ATTENTION_PROBE_LAYERS": None,
+        "QVG_ATTENTION_PROBE_HEADS": None,
+        "QVG_ATTENTION_PROBE_CHUNKS": None,
+    }
+    with _patched_environ(keys):
+        config = capture.CaptureConfig.from_env()
+    assert config.enabled is True
+    assert config.output_dir == tmp_path
+    assert config.layers == {27, 28, 29}
+    assert config.heads == {0, 9}
+    assert config.chunks == {24, 25, 26}
+    assert config.max_file_bytes == 12345
+    assert config.max_cache_tokens == 7
+    assert config.variant_name == "hqmq-fake"
+
+    with _patched_environ(
+        {
+            "QVG_ATTENTION_PROBE_LAYERS": "all",
+            "QVG_ATTENTION_PROBE_HEADS": "1,3",
+            "QVG_ATTENTION_PROBE_CHUNKS": "4,5",
+        }
+    ):
+        config = capture.CaptureConfig.from_env()
+    assert config.layers is None
+    assert config.heads == {1, 3}
+    assert config.chunks == {4, 5}
+
+
+def test_capture_selection_skip_and_chunk_slicing(tmp_path):
+    capture = _load_tool_module("attention_probe_capture.py", "qvg_attention_probe_capture_selection")
+    query = torch.randn(1, 2, 2, 4)
+    key_all = torch.randn(1, 10, 2, 4)
+    value_all = torch.randn(1, 10, 2, 4)
+
+    disabled = capture.CaptureConfig(enabled=False, output_dir=tmp_path, layers={29}, chunks={4})
+    skipped = capture.write_self_forcing_probe_capture(
+        layer_idx=29,
+        current_start=8,
+        local_start_index=8,
+        local_end_index=10,
+        frame_seq_length=2,
+        query_rope_bshd=query,
+        key_all_rope_bshd=key_all,
+        value_all_bshd=value_all,
+        config=disabled,
+    )
+    assert skipped["status"] == "skipped_selection"
+
+    layer_mismatch = capture.CaptureConfig(enabled=True, output_dir=tmp_path, layers={28}, chunks={4})
+    skipped = capture.write_self_forcing_probe_capture(
+        layer_idx=29,
+        current_start=8,
+        local_start_index=8,
+        local_end_index=10,
+        frame_seq_length=2,
+        query_rope_bshd=query,
+        key_all_rope_bshd=key_all,
+        value_all_bshd=value_all,
+        config=layer_mismatch,
+    )
+    assert skipped["status"] == "skipped_selection"
+
+    bounded = capture.CaptureConfig(
+        enabled=True,
+        output_dir=tmp_path,
+        layers={29},
+        heads={1},
+        chunks={1, 3, 4},
+        max_file_bytes=1024 * 1024,
+    )
+    record = capture.build_self_forcing_probe_record(
+        layer_idx=29,
+        current_start=8,
+        local_start_index=8,
+        local_end_index=10,
+        frame_seq_length=2,
+        query_rope_bshd=query,
+        key_all_rope_bshd=key_all,
+        value_all_bshd=value_all,
+        config=bounded,
+    )
+    assert record["cached_key_ref"].shape == (1, 1, 4, 4)
+    assert record["current_key"].shape == (1, 1, 2, 4)
+    assert record["metadata"]["cached_chunk_indices"] == [1, 3]
+    assert record["metadata"]["current_chunk_indices"] == [4]
+
+
+def test_capture_head_guard_cache_truncation_and_post_write_guard(tmp_path):
+    capture = _load_tool_module("attention_probe_capture.py", "qvg_attention_probe_capture_guards")
+    query = torch.randn(1, 2, 2, 4)
+    key_all = torch.randn(1, 6, 2, 4)
+    value_all = torch.randn(1, 6, 2, 4)
+
+    invalid_head = capture.CaptureConfig(enabled=True, output_dir=tmp_path, heads={99}, chunks=None)
+    try:
+        capture.build_self_forcing_probe_record(
+            layer_idx=0,
+            current_start=4,
+            local_start_index=4,
+            local_end_index=6,
+            frame_seq_length=2,
+            query_rope_bshd=query,
+            key_all_rope_bshd=key_all,
+            value_all_bshd=value_all,
+            config=invalid_head,
+        )
+        raise AssertionError("expected invalid head selection to raise")
+    except ValueError as exc:
+        assert "matched no heads" in str(exc)
+
+    truncated = capture.CaptureConfig(
+        enabled=True,
+        output_dir=tmp_path,
+        heads={0},
+        chunks=None,
+        max_cache_tokens=2,
+    )
+    record = capture.build_self_forcing_probe_record(
+        layer_idx=0,
+        current_start=4,
+        local_start_index=4,
+        local_end_index=6,
+        frame_seq_length=2,
+        query_rope_bshd=query,
+        key_all_rope_bshd=key_all,
+        value_all_bshd=value_all,
+        config=truncated,
+    )
+    assert record["cached_key_ref"].shape == (1, 1, 2, 4)
+    assert record["metadata"]["dropped_prefix_cache_tokens"] == 2
+
+    output_path = tmp_path / "post_write_guard.pt"
+    manifest = capture.write_probe_input(output_path, [{"metadata": {}}], max_file_bytes=1)
+    assert manifest["status"] == "skipped_byte_guard"
+    assert manifest["estimated_tensor_bytes"] == 0
+    assert not output_path.exists()
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmpdir:
         test_probe_artifact_and_cache_audit_smoke(Path(tmpdir))
         test_self_forcing_capture_schema_is_bounded_and_bhsd(Path(tmpdir))
+        test_capture_env_defaults_and_overrides(Path(tmpdir))
+        test_capture_selection_skip_and_chunk_slicing(Path(tmpdir))
+        test_capture_head_guard_cache_truncation_and_post_write_guard(Path(tmpdir))
     test_attention_metrics_detect_k_only_perturbation()
     test_attention_metrics_detect_v_only_perturbation_without_logit_change()
