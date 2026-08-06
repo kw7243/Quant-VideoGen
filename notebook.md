@@ -1008,3 +1008,64 @@ Use the research reproducibility staging helper, do Slurm preflight first, and
 do not duplicate the pending Med3x smoke. After the bounded artifacts exist and
 remain under the byte guard, run `tools/attention_error_probe.py --input` on the
 paired probe artifact or on a small merged BF16/reference-plus-variant artifact.
+
+## 2026-08-05 - Bounded Attention-Capture Slurm Setup
+
+Task: prepare one staged Self-Forcing attention-capture Slurm submission on
+branch `fm/qvg-attention-capture-slurm-run`, starting from
+`kw7243/fm/qvg-self-forcing-attention-capture-hook`.
+
+HYPOTHESIS: a bounded real Self-Forcing attention-call capture around layers
+27-29, heads 0 and 9, and chunks 24-26 is the next input needed to test whether
+the observed QVG/Self-Forcing cache geometry predicts functional attention
+distortion.
+
+RUN CHOICE: default the submitted run to BF16/reference semantics
+(`QUANT_TYPE=none`, `QVG_ATTENTION_PROBE_VARIANT=bf16_reference`) rather than
+fake-quantizing the live cache. This preserves reference Q/K/V tensors for
+offline variants or a later paired merge. The run remains bounded to one prompt,
+27 frames, local attention size 27, and no full KV dump (`DUMP_KV_LEVEL=0`).
+
+Output root:
+
+```text
+/data/scratch-fast/kwen1/firstmate/data/qvg-attention-capture-slurm-run/
+```
+
+Added submission files:
+
+- `scripts/Self-Forcing/attention_capture_bf16.sbatch`: H200 Slurm job with
+  account/QoS `vision-torralba-urops-meng`, `gpu:1`, 8 CPUs, 96G host memory,
+  one-hour limit, task-local logs, task-local captures, scratch-backed caches,
+  staged-copy checkpoint symlinks, GPU/import preflight, and a post-run capture
+  manifest.
+- `scripts/Self-Forcing/submit_attention_capture.sh`: staged-only wrapper that
+  refuses to run outside `stage_and_run.sh`, checks scratch model/checkpoint
+  paths, runs Slurm association/partition and `sbatch --test-only` preflight,
+  submits exactly one job, and writes task-local submission metadata.
+
+Required capture bounds enforced by the Slurm job:
+
+```text
+QVG_ATTENTION_PROBE_ENABLED=1
+QVG_ATTENTION_PROBE_LAYERS=27,28,29
+QVG_ATTENTION_PROBE_HEADS=0,9
+QVG_ATTENTION_PROBE_CHUNKS=24,25,26
+QVG_ATTENTION_PROBE_MAX_FILE_BYTES=67108864
+```
+
+Source-side validation before staging:
+
+```bash
+bash -n scripts/Self-Forcing/attention_capture_bf16.sbatch \
+  scripts/Self-Forcing/submit_attention_capture.sh
+python3 -m py_compile tools/attention_probe_capture.py \
+  tools/attention_error_probe.py \
+  experiments/Self-Forcing/wan/modules/causal_model.py \
+  tests/test_attention_error_probe.py
+git diff --check
+git diff --cached --check
+```
+
+All passed. Slurm preflight and submission are intentionally left to the staged
+copy, per the reproducibility rule.
