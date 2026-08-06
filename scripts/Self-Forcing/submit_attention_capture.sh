@@ -62,9 +62,9 @@ export QVG_ATTENTION_PROBE_MAX_FILE_BYTES=67108864
 export QVG_ATTENTION_PROBE_VARIANT=bf16_reference
 
 echo "SBATCH_REQUEST account=$ACCOUNT qos=$QOS partition=$PARTITION gres=gpu:1 cpus=8 mem=96G time=01:00:00"
-sbatch --test-only --chdir="$PWD" "$JOB_SCRIPT" | tee "$SBATCH_TEST_OUT"
+sbatch --test-only --chdir="$PWD" "$JOB_SCRIPT" 2>&1 | tee "$SBATCH_TEST_OUT"
 
-SBATCH_OUT="$(sbatch --chdir="$PWD" "$JOB_SCRIPT")"
+SBATCH_OUT="$(sbatch --chdir="$PWD" "$JOB_SCRIPT" 2>&1)"
 echo "$SBATCH_OUT"
 JOB_ID="$(awk '/Submitted batch job/ {print $4}' <<< "$SBATCH_OUT")"
 if [[ -z "$JOB_ID" ]]; then

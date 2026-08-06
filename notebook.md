@@ -1069,3 +1069,78 @@ git diff --cached --check
 
 All passed. Slurm preflight and submission are intentionally left to the staged
 copy, per the reproducibility rule.
+
+Staged submission command:
+
+```bash
+/afs/csail.mit.edu/u/k/kwen1/.codex/skills/research-reproducibility/scripts/stage_and_run.sh \
+  --staging-parent /data/scratch-fast/kwen1/qvg-staging \
+  -- bash scripts/Self-Forcing/submit_attention_capture.sh
+```
+
+Staged copy:
+
+```text
+/data/scratch-fast/kwen1/qvg-staging/20260805_222232-7132ad-2359491-code
+```
+
+Staged metadata:
+
+```text
+git_commit_full: 235949177507a9eca84ecb0dcb85f211cb99418a
+git_status_short: clean
+command: bash scripts/Self-Forcing/submit_attention_capture.sh
+```
+
+Slurm preflight from the staged copy passed:
+
+- Association includes `kwen1|vision-torralba-urops-meng` with QoS
+  `vision-torralba-urops-meng`.
+- `vision-torralba-h200` is `UP`, node `torralba-h200-1`, GRES
+  `gpu:h200:8`, memory `2063711M`.
+- Partition policy allows account/QoS `vision-torralba-urops-meng`.
+- Requested job resources: account/QoS `vision-torralba-urops-meng`,
+  partition `vision-torralba-h200`, `gres=gpu:1`, 8 CPUs, 96G host memory,
+  one-hour limit.
+- `sbatch --test-only` accepted the request and predicted a possible start at
+  `2026-08-08T18:10:09`; Slurm printed that message on stderr, so the wrapper
+  was updated after submission to capture stderr into future preflight files.
+
+Submitted Slurm job:
+
+```text
+job id: 1316140
+state at inspection: PENDING
+reason: Priority
+StartTime: Unknown
+dependency: none
+ReqTRES: cpu=8,mem=96G,node=1,billing=5800,gres/gpu=1
+WorkDir: /data/scratch-fast/kwen1/qvg-staging/20260805_222232-7132ad-2359491-code
+Command: scripts/Self-Forcing/attention_capture_bf16.sbatch
+```
+
+Task-local paths:
+
+```text
+submission metadata:
+/data/scratch-fast/kwen1/firstmate/data/qvg-attention-capture-slurm-run/submission_1316140.json
+
+stdout:
+/data/scratch-fast/kwen1/firstmate/data/qvg-attention-capture-slurm-run/logs/qvg_sf_attncap-1316140.out
+
+stderr:
+/data/scratch-fast/kwen1/firstmate/data/qvg-attention-capture-slurm-run/logs/qvg_sf_attncap-1316140.err
+
+video/output directory:
+/data/scratch-fast/kwen1/firstmate/data/qvg-attention-capture-slurm-run/outputs/bf16_attncap_27f_prompt1_1316140
+
+attention capture directory:
+/data/scratch-fast/kwen1/firstmate/data/qvg-attention-capture-slurm-run/captures/bf16_attncap_27f_prompt1_1316140
+
+capture manifest after terminal success:
+/data/scratch-fast/kwen1/firstmate/data/qvg-attention-capture-slurm-run/capture_manifests/bf16_attncap_27f_prompt1_1316140.json
+```
+
+Job `1295590` was not modified, canceled, or used as a dependency. This
+submission is a distinct BF16/reference attention-capture job, not the pending
+Med3x smoke continuation.
