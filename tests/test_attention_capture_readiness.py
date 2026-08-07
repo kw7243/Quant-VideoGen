@@ -23,7 +23,7 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _submission(root: Path, *, max_file_bytes: int = 1024) -> dict:
+def _submission(root: Path, *, max_file_bytes: int = 1024, chunks: str = "24,25,26") -> dict:
     return {
         "job_id": "1316140",
         "staged_copy": "/tmp/staged",
@@ -49,7 +49,7 @@ def _submission(root: Path, *, max_file_bytes: int = 1024) -> dict:
             "enabled": 1,
             "layers": "27,28,29",
             "heads": "0,9",
-            "chunks": "24,25,26",
+            "chunks": chunks,
             "max_file_bytes": max_file_bytes,
             "variant": "bf16_reference",
         },
@@ -57,8 +57,8 @@ def _submission(root: Path, *, max_file_bytes: int = 1024) -> dict:
     }
 
 
-def _write_submission(root: Path, *, max_file_bytes: int = 1024) -> dict:
-    data = _submission(root, max_file_bytes=max_file_bytes)
+def _write_submission(root: Path, *, max_file_bytes: int = 1024, chunks: str = "24,25,26") -> dict:
+    data = _submission(root, max_file_bytes=max_file_bytes, chunks=chunks)
     _write_json(root / "submission_1316140.json", data)
     return data
 
@@ -70,8 +70,14 @@ def _make_complete_artifacts(
     max_file_bytes: int = 1024,
     capture_size: int = 64,
     selected_heads: list[int] | None = None,
+    selected_chunks: list[int] | None = None,
+    cached_chunk_indices: list[int] | None = None,
+    current_chunk_indices: list[int] | None = None,
+    variant_names: list[str] | None = None,
+    record_chunks: list[int] | None = None,
 ) -> dict:
-    submission = _write_submission(root, max_file_bytes=max_file_bytes)
+    chunks = ",".join(str(item) for item in (selected_chunks if selected_chunks is not None else [24, 25, 26]))
+    submission = _write_submission(root, max_file_bytes=max_file_bytes, chunks=chunks)
     Path(submission["log_stdout"]).parent.mkdir(parents=True, exist_ok=True)
     Path(submission["log_stdout"]).write_text("capture_file_count=1\n", encoding="utf-8")
     Path(submission["log_stderr"]).write_text("", encoding="utf-8")
@@ -84,22 +90,23 @@ def _make_complete_artifacts(
     capture_path.write_bytes(b"x" * capture_size)
     records = []
     for layer_idx in (27, 28, 29):
-        for chunk_idx in (24, 25, 26):
+        for chunk_idx in (record_chunks if record_chunks is not None else [24, 25, 26]):
             records.append(
                 {
                     "name": f"layer_{layer_idx}_chunk_{chunk_idx}",
                     "layer_idx": layer_idx,
                     "chunk_idx": chunk_idx,
                     "selected_heads": selected_heads if selected_heads is not None else [0, 9],
-                    "selected_chunks": [24, 25, 26],
-                    "cached_chunk_indices": [24],
-                    "current_chunk_indices": [chunk_idx],
+                    "selected_chunks": selected_chunks if selected_chunks is not None else [24, 25, 26],
+                    "cached_chunk_indices": cached_chunk_indices if cached_chunk_indices is not None else [24],
+                    "current_chunk_indices": current_chunk_indices if current_chunk_indices is not None else [chunk_idx],
                     "selected_cached_tokens": 4,
                     "selected_current_tokens": 2,
                     "query_shape": [1, 2, 2, 128],
                     "cached_key_ref_shape": [1, 2, 4, 128],
                     "current_key_shape": [1, 2, 2, 128],
                     "has_variants": has_variants,
+                    "variant_names": variant_names,
                 }
             )
     manifest = {
@@ -120,10 +127,11 @@ def _make_complete_artifacts(
     return submission
 
 
-def _evaluate(readiness, root: Path, *, max_file_bytes: int = 1024):
+def _evaluate(readiness, root: Path, *, max_file_bytes: int = 1024, expected_chunks=None):
     return readiness.evaluate_readiness(
         task_root=root,
         job_id="1316140",
+        expected_chunks=expected_chunks if expected_chunks is not None else (24, 25, 26),
         expected_max_capture_file_bytes=max_file_bytes,
         probe_python="python3",
         tool_path=root / "tools" / "attention_error_probe.py",
@@ -142,6 +150,10 @@ def test_pending_artifacts_are_not_ready_without_crashing(tmp_path):
     assert "stderr_log_missing" in summary["reasons"]
     assert "capture_manifest_missing" in summary["reasons"]
     assert summary["next_attention_error_probe_command"] is None
+    gate = summary["focused_attention_error_gate"]
+    assert gate["status"] == "not_ready"
+    assert gate["decision_state"] == "no_claim"
+    assert gate["probe_commands"] == []
 
 
 def test_complete_reference_only_capture_emits_identity_probe_command(tmp_path):
@@ -156,6 +168,9 @@ def test_complete_reference_only_capture_emits_identity_probe_command(tmp_path):
     assert "--identity-variant-if-missing" in summary["next_attention_error_probe_command"]
     assert "--record-limit 1" in summary["next_attention_error_probe_command"]
     assert summary["reasons"] == []
+    gate = summary["focused_attention_error_gate"]
+    assert gate["status"] == "incomplete"
+    assert "cached_chunk_23_missing" in gate["reasons"]
 
 
 def test_complete_variant_capture_emits_distortion_probe_command(tmp_path):
@@ -168,6 +183,9 @@ def test_complete_variant_capture_emits_distortion_probe_command(tmp_path):
     assert summary["variant_distortion_ready"] is True
     assert summary["analysis_mode"] == "variant_distortion"
     assert "--identity-variant-if-missing" not in summary["next_attention_error_probe_command"]
+    gate = summary["focused_attention_error_gate"]
+    assert gate["status"] == "incomplete"
+    assert "cached_chunk_23_missing" in gate["reasons"]
 
 
 def test_capture_byte_guard_blocks_oversized_capture(tmp_path):
@@ -193,6 +211,55 @@ def test_capture_selection_mismatch_is_machine_readable(tmp_path):
     assert selection_checks[0]["details"]["selected_head_mismatches"]
 
 
+def test_focused_exact_reference_capture_is_identity_only(tmp_path):
+    readiness = _load_tool_module("attention_capture_readiness.py", "qvg_attention_capture_readiness_focus_ref")
+    _make_complete_artifacts(
+        tmp_path,
+        has_variants=False,
+        selected_chunks=[24],
+        cached_chunk_indices=[23],
+        current_chunk_indices=[24],
+        record_chunks=[24],
+    )
+
+    summary = _evaluate(readiness, tmp_path, expected_chunks=(24,))
+
+    gate = summary["focused_attention_error_gate"]
+    assert summary["status"] == "ready"
+    assert gate["status"] == "incomplete"
+    assert gate["decision_state"] == "identity_reference_only"
+    assert gate["support"]["target_head_supported"] is True
+    assert gate["support"]["control_head_supported"] is True
+    assert gate["support"]["cached_transition_supported"] is True
+    assert gate["support"]["current_transition_supported"] is True
+    assert gate["probe_commands"][0]["role"] == "reference_only_no_distortion_claim"
+    assert "--identity-variant-if-missing" in gate["probe_commands"][0]["command"]
+
+
+def test_focused_gate_emits_separated_k_and_v_commands(tmp_path):
+    readiness = _load_tool_module("attention_capture_readiness.py", "qvg_attention_capture_readiness_focus_variants")
+    _make_complete_artifacts(
+        tmp_path,
+        has_variants=True,
+        selected_chunks=[24],
+        cached_chunk_indices=[23],
+        current_chunk_indices=[24],
+        variant_names=["hqmq_k_only", "hqmq_v_only"],
+        record_chunks=[24],
+    )
+
+    summary = _evaluate(readiness, tmp_path, expected_chunks=(24,))
+
+    gate = summary["focused_attention_error_gate"]
+    assert gate["status"] == "ready"
+    assert gate["decision_state"] == "attention_error_probe_ready"
+    commands = {item["role"]: item["command"] for item in gate["probe_commands"]}
+    assert set(commands) == {"k_only", "v_only"}
+    assert "--variant-name hqmq_k_only" in commands["k_only"]
+    assert "--variant-name hqmq_v_only" in commands["v_only"]
+    assert "--identity-variant-if-missing" not in commands["k_only"]
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmpdir:
         test_pending_artifacts_are_not_ready_without_crashing(Path(tmpdir) / "pending")
@@ -204,3 +271,7 @@ if __name__ == "__main__":
         test_capture_byte_guard_blocks_oversized_capture(Path(tmpdir) / "byteguard")
     with tempfile.TemporaryDirectory() as tmpdir:
         test_capture_selection_mismatch_is_machine_readable(Path(tmpdir) / "selection")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_focused_exact_reference_capture_is_identity_only(Path(tmpdir) / "focus-reference")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_focused_gate_emits_separated_k_and_v_commands(Path(tmpdir) / "focus-variants")

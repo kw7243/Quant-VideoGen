@@ -1246,3 +1246,84 @@ Novelty guard:
 - The scaffold supports only readiness for testing whether the observed local
   cache geometry predicts functional attention distortion in actual
   Self-Forcing attention calls.
+
+## 2026-08-07 - Focused Attention-Error Decision Gate
+
+Task: build the next CPU-only decision gate for the pending attention-capture
+job `1316140`, focused on the cache-anomaly result from the staged audit.
+
+Branch:
+
+```text
+fm/qvg-focused-attention-error-gate
+```
+
+Scope:
+
+- Focused decision target: layer `29`, target head `9`, control head `0`,
+  cached chunk `23`, current chunk `24`.
+- K-only and V-only variants must be identifiable separately before the gate
+  emits separated attention-error probe commands.
+- Missing logs, manifest, capture directory, capture files, byte-guard failure,
+  missing focused record, missing chunk transition, or reference-only captures
+  remain explicit `not_ready` or `incomplete` states with `decision_state` set
+  to a no-claim mode.
+
+Implementation:
+
+- Extended `tools/attention_capture_readiness.py` with a
+  `focused_attention_error_gate` block in the existing readiness JSON.
+- Added focused CLI options:
+  `--focused-layer`, `--focused-target-head`, `--focused-control-head`,
+  `--focused-cached-chunk`, and `--focused-current-chunk`.
+- The focused gate now reports support for the target/control heads, cached and
+  current chunk indices, variant-name availability, K-only variant name, V-only
+  variant name, and the smallest safe probe commands when supported.
+- Reference-only exact-transition captures emit only an identity offline
+  attention-path check and remain `incomplete`; they do not become distortion
+  evidence.
+- Extended `tools/attention_error_probe.py` with repeatable `--variant-name`,
+  so K-only and V-only variants can be probed into separate JSON outputs.
+- Extended the Self-Forcing capture manifest summarizer to include
+  `variant_names` when a capture file contains variants.
+- Added focused CPU fixtures for absent artifacts, exact-transition
+  reference-only captures, exact-transition separated K/V variants, and the
+  current chunk-23-missing no-claim state.
+
+Live job `1316140` focused readiness command:
+
+```bash
+python3 tools/attention_capture_readiness.py --compact \
+  -o /data/scratch-fast/kwen1/firstmate/data/qvg-focused-attention-error-gate/readiness_1316140_focused.json
+```
+
+Live result:
+
+- Top-level readiness: `status=not_ready`, `ready=false`.
+- Missing artifacts: stdout log, stderr log, output directory, capture
+  directory, and capture manifest.
+- Focused gate: `status=not_ready`, `decision_state=no_claim`.
+- Focused reason: `capture_artifacts_not_ready_or_invalid`.
+- No focused probe command is emitted while these artifacts are absent.
+
+Validation:
+
+```bash
+python3 -m py_compile tools/attention_capture_readiness.py \
+  tools/attention_error_probe.py tests/test_attention_capture_readiness.py \
+  tests/test_attention_error_probe.py
+python3 tests/test_attention_capture_readiness.py
+/data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_attention_error_probe.py
+python3 tools/attention_capture_readiness.py --compact \
+  -o /data/scratch-fast/kwen1/firstmate/data/qvg-focused-attention-error-gate/readiness_1316140_focused.json
+git diff --check
+```
+
+All commands passed.
+
+Guard:
+
+- No Slurm jobs were submitted, canceled, inspected, or modified.
+- No GPU inference, model loading, real-video metrics, downloads, checkpoint
+  changes, PR, main merge, or claims about video quality, memory reduction,
+  latency speedup, systems gains, or novelty were performed.

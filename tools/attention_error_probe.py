@@ -418,10 +418,13 @@ def probe_record(
     top_k: int,
     eps: float,
     identity_variant_if_missing: bool = False,
+    variant_names: set[str] | None = None,
 ) -> dict[str, Any]:
     canonical = _canonical_record_tensors(record, default_layout=default_layout)
     variants = []
     for name, variant in _iter_variants(record, identity_variant_if_missing=identity_variant_if_missing):
+        if variant_names is not None and name not in variant_names:
+            continue
         metrics = compute_attention_error_metrics(
             query=canonical["query"],
             current_key=canonical["current_key"],
@@ -438,6 +441,9 @@ def probe_record(
             eps=eps,
         )
         variants.append({"name": name, "metrics": metrics, "metadata": _safe_jsonify(variant.get("metadata", {}))})
+    if not variants:
+        requested = sorted(variant_names) if variant_names is not None else []
+        raise ValueError(f"probe record has no variants matching requested names: {requested}")
 
     return {
         "name": str(record.get("name", "record")),
@@ -491,6 +497,7 @@ def run_probe_artifact(
     record_limit: int | None = None,
     trust_pickle: bool = False,
     identity_variant_if_missing: bool = False,
+    variant_names: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     path = Path(input_path).expanduser()
     stat = path.stat()
@@ -498,6 +505,7 @@ def run_probe_artifact(
     records = _records_from_probe_input(obj)
     if record_limit is not None:
         records = records[:record_limit]
+    selected_variant_names = set(variant_names) if variant_names is not None else None
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -515,6 +523,7 @@ def run_probe_artifact(
             "eps": _safe_float(eps),
             "record_count": len(records),
             "identity_variant_if_missing": bool(identity_variant_if_missing),
+            "variant_names": sorted(selected_variant_names) if selected_variant_names is not None else None,
         },
         "records": [
             probe_record(
@@ -523,6 +532,7 @@ def run_probe_artifact(
                 top_k=top_k,
                 eps=eps,
                 identity_variant_if_missing=identity_variant_if_missing,
+                variant_names=selected_variant_names,
             )
             for record in records
         ],
@@ -660,6 +670,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "This validates the offline attention path but does not measure quantized-cache distortion."
         ),
     )
+    parser.add_argument(
+        "--variant-name",
+        action="append",
+        help="Only evaluate a named variant. Repeat to include multiple variants.",
+    )
     parser.add_argument("--compact", action="store_true", help="Emit compact JSON")
     return parser
 
@@ -679,6 +694,7 @@ def main(argv: list[str] | None = None) -> int:
                 record_limit=args.record_limit,
                 trust_pickle=args.trust_pickle,
                 identity_variant_if_missing=args.identity_variant_if_missing,
+                variant_names=args.variant_name,
             )
     except Exception as exc:
         print(json.dumps({"status": "attention_probe_failed", "error": repr(exc)}), file=sys.stderr)

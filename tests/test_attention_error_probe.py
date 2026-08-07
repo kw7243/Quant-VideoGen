@@ -149,6 +149,16 @@ def test_probe_artifact_and_cache_audit_smoke(tmp_path):
     assert summary["records"][0]["variants"][0]["name"] == "k_swap"
     assert summary["records"][0]["variants"][1]["name"] == "v_swap"
 
+    k_only = probe.run_probe_artifact(artifact, top_k=1, variant_names=["k_swap"])
+    assert k_only["config"]["variant_names"] == ["k_swap"]
+    assert [item["name"] for item in k_only["records"][0]["variants"]] == ["k_swap"]
+
+    try:
+        probe.run_probe_artifact(artifact, top_k=1, variant_names=["missing_variant"])
+        raise AssertionError("expected missing variant selection to raise")
+    except ValueError as exc:
+        assert "missing_variant" in str(exc)
+
     smoke = probe.smoke_cache_audit_summary(
         Path(__file__).resolve().parents[1] / "analysis" / "cache_audit_frames27_bounded_stats.json"
     )

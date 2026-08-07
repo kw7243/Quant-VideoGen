@@ -26,6 +26,13 @@ DEFAULT_EXPECTED_HEADS = (0, 9)
 DEFAULT_EXPECTED_CHUNKS = (24, 25, 26)
 DEFAULT_MAX_CAPTURE_FILE_BYTES = 64 * 1024**2
 DEFAULT_PROBE_PYTHON = "/data/scratch-fast/kwen1/eval_envs/vbench/bin/python"
+DEFAULT_FOCUSED_LAYER = 29
+DEFAULT_FOCUSED_TARGET_HEAD = 9
+DEFAULT_FOCUSED_CONTROL_HEAD = 0
+DEFAULT_FOCUSED_CACHED_CHUNK = 23
+DEFAULT_FOCUSED_CURRENT_CHUNK = 24
+K_ONLY_VARIANT_MARKERS = ("k_only", "key_only", "k-only", "key-only", "konly", "keyonly")
+V_ONLY_VARIANT_MARKERS = ("v_only", "value_only", "v-only", "value-only", "vonly", "valueonly")
 
 
 def _utc_now() -> str:
@@ -147,6 +154,7 @@ def _make_probe_command(
     input_path: str,
     output_path: Path,
     identity_variant_if_missing: bool,
+    variant_name: str | None = None,
 ) -> str:
     parts: list[str | Path] = [
         probe_python,
@@ -158,8 +166,281 @@ def _make_probe_command(
     ]
     if identity_variant_if_missing:
         parts.append("--identity-variant-if-missing")
+    if variant_name is not None:
+        parts.extend(["--variant-name", variant_name])
     parts.extend(["-o", output_path])
     return _quote_command(parts)
+
+
+def _record_value(record: Mapping[str, Any], key: str) -> Any:
+    if key in record:
+        return record.get(key)
+    metadata = record.get("metadata")
+    if isinstance(metadata, Mapping):
+        return metadata.get(key)
+    return None
+
+
+def _record_int(record: Mapping[str, Any], key: str) -> int | None:
+    return _safe_int(_record_value(record, key))
+
+
+def _record_int_list(record: Mapping[str, Any], key: str) -> list[int] | str | None:
+    return _parse_int_list(_record_value(record, key))
+
+
+def _record_variant_names(record: Mapping[str, Any]) -> list[str] | None:
+    raw = _record_value(record, "variant_names")
+    if raw is None:
+        raw = _record_value(record, "variants")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, Mapping):
+        return [str(name) for name in raw.keys()]
+    if isinstance(raw, list):
+        result = []
+        for idx, item in enumerate(raw):
+            if isinstance(item, Mapping):
+                result.append(str(item.get("name", f"variant_{idx}")))
+            else:
+                result.append(str(item))
+        return result
+    return [str(raw)]
+
+
+def _find_role_variant(variant_names: list[str] | None, markers: Iterable[str]) -> str | None:
+    if not variant_names:
+        return None
+    lowered = [(name, name.lower()) for name in variant_names]
+    for marker in markers:
+        for original, lower in lowered:
+            if marker in lower:
+                return original
+    return None
+
+
+def _focused_output_path(task_root: Path, job_id: str, label: str) -> Path:
+    safe_label = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in label).strip("_") or "focused"
+    return task_root / "attention_probe_results" / f"focused_attention_error_{job_id}_{safe_label}.json"
+
+
+def _build_focused_gate(
+    *,
+    artifact_ready: bool,
+    capture_records: list[Mapping[str, Any]],
+    capture_files: list[dict[str, Any]],
+    has_variant_records: bool,
+    probe_python: str,
+    tool_path: Path,
+    root: Path,
+    job_id: str,
+    focused_layer: int,
+    focused_target_head: int,
+    focused_control_head: int,
+    focused_cached_chunk: int,
+    focused_current_chunk: int,
+) -> dict[str, Any]:
+    focus = {
+        "layer": int(focused_layer),
+        "target_head": int(focused_target_head),
+        "control_head": int(focused_control_head),
+        "cached_chunk": int(focused_cached_chunk),
+        "current_chunk": int(focused_current_chunk),
+        "transition": f"{int(focused_cached_chunk)} -> {int(focused_current_chunk)}",
+        "required_variant_roles": ["k_only", "v_only"],
+    }
+    gate: dict[str, Any] = {
+        "schema_version": "qvg-focused-attention-error-gate.v1",
+        "status": "not_ready",
+        "decision_state": "no_claim",
+        "focus": focus,
+        "support": {
+            "artifact_ready": bool(artifact_ready),
+            "has_variant_records": bool(has_variant_records),
+        },
+        "probe_commands": [],
+        "summary": None,
+        "reasons": [],
+        "notes": [
+            "This gate only decides whether a focused CPU offline attention-error probe is supported.",
+            "It does not claim video quality, memory reduction, latency, systems gain, or novelty.",
+        ],
+    }
+    if not artifact_ready:
+        gate["reasons"].append("capture_artifacts_not_ready_or_invalid")
+        gate["summary"] = "Capture logs, manifest, files, or byte guards are not ready, so no focused claim is possible."
+        return gate
+
+    def record_path(record: Mapping[str, Any]) -> str | None:
+        for file_info in capture_files:
+            records = file_info.get("records")
+            if isinstance(records, list) and record in records:
+                return file_info.get("path")
+        return str(record.get("_capture_path")) if record.get("_capture_path") else None
+
+    layer_records = [record for record in capture_records if _record_int(record, "layer_idx") == focused_layer]
+    current_records = [
+        record
+        for record in layer_records
+        if _record_int(record, "chunk_idx") == focused_current_chunk
+        or _record_int_list(record, "current_chunk_indices") == [focused_current_chunk]
+        or (
+            isinstance(_record_int_list(record, "current_chunk_indices"), list)
+            and focused_current_chunk in _record_int_list(record, "current_chunk_indices")
+        )
+    ]
+    target_record = current_records[0] if current_records else None
+    if target_record is None:
+        gate["status"] = "incomplete"
+        gate["support"].update(
+            {
+                "focused_layer_records": len(layer_records),
+                "focused_current_chunk_records": 0,
+            }
+        )
+        gate["reasons"].append("focused_layer_current_chunk_record_missing")
+        gate["summary"] = "Artifacts exist, but no record covers the focused layer/current chunk."
+        return gate
+
+    selected_heads = _record_int_list(target_record, "selected_heads")
+    selected_chunks = _record_int_list(target_record, "selected_chunks")
+    cached_chunks = _record_int_list(target_record, "cached_chunk_indices")
+    current_chunks = _record_int_list(target_record, "current_chunk_indices")
+    variant_names = _record_variant_names(target_record)
+    k_only_variant = _find_role_variant(variant_names, K_ONLY_VARIANT_MARKERS)
+    v_only_variant = _find_role_variant(variant_names, V_ONLY_VARIANT_MARKERS)
+    path = record_path(target_record)
+    target_has_variants = bool(_record_value(target_record, "has_variants")) or bool(variant_names)
+    target_head_supported = selected_heads == "all" or (
+        isinstance(selected_heads, list) and focused_target_head in selected_heads
+    )
+    control_head_supported = selected_heads == "all" or (
+        isinstance(selected_heads, list) and focused_control_head in selected_heads
+    )
+    cached_transition_supported = cached_chunks == "all" or (
+        isinstance(cached_chunks, list) and focused_cached_chunk in cached_chunks
+    )
+    current_transition_supported = current_chunks == "all" or (
+        isinstance(current_chunks, list) and focused_current_chunk in current_chunks
+    )
+    gate["support"].update(
+        {
+            "record": {
+                "name": target_record.get("name"),
+                "path": path,
+                "layer_idx": _record_int(target_record, "layer_idx"),
+                "chunk_idx": _record_int(target_record, "chunk_idx"),
+                "selected_heads": selected_heads,
+                "selected_chunks": selected_chunks,
+                "cached_chunk_indices": cached_chunks,
+                "current_chunk_indices": current_chunks,
+                "selected_cached_tokens": _record_int(target_record, "selected_cached_tokens"),
+                "selected_current_tokens": _record_int(target_record, "selected_current_tokens"),
+                "query_shape": target_record.get("query_shape"),
+                "cached_key_ref_shape": target_record.get("cached_key_ref_shape"),
+                "current_key_shape": target_record.get("current_key_shape"),
+            },
+            "target_head_supported": bool(target_head_supported),
+            "control_head_supported": bool(control_head_supported),
+            "cached_transition_supported": bool(cached_transition_supported),
+            "current_transition_supported": bool(current_transition_supported),
+            "variant_names": variant_names,
+            "k_only_variant": k_only_variant,
+            "v_only_variant": v_only_variant,
+            "variant_names_known": variant_names is not None,
+            "target_record_has_variants": bool(target_has_variants),
+        }
+    )
+
+    missing_support = []
+    if not target_head_supported:
+        missing_support.append("target_head_missing")
+    if not control_head_supported:
+        missing_support.append("control_head_missing")
+    if not cached_transition_supported:
+        missing_support.append(f"cached_chunk_{focused_cached_chunk}_missing")
+    if not current_transition_supported:
+        missing_support.append(f"current_chunk_{focused_current_chunk}_missing")
+    if missing_support:
+        gate["status"] = "incomplete"
+        gate["reasons"].extend(missing_support)
+        gate["summary"] = "Artifacts exist, but the focused layer/head/chunk transition is not fully supported."
+        return gate
+
+    if path is None:
+        gate["status"] = "incomplete"
+        gate["reasons"].append("focused_capture_path_missing")
+        gate["summary"] = "The focused record is present in the manifest, but no capture file path is available."
+        return gate
+
+    identity_command = _make_probe_command(
+        probe_python=probe_python,
+        tool_path=tool_path,
+        input_path=path,
+        output_path=_focused_output_path(root, str(job_id), "identity_reference_path_check"),
+        identity_variant_if_missing=True,
+    )
+    if not target_has_variants:
+        gate["status"] = "incomplete"
+        gate["decision_state"] = "identity_reference_only"
+        gate["reasons"].append("variant_records_missing")
+        gate["summary"] = (
+            "The focused reference capture is present, but there are no paired variants. "
+            "Only an identity offline attention-path check is safe."
+        )
+        gate["probe_commands"].append(
+            {
+                "name": "identity_reference_path_check",
+                "role": "reference_only_no_distortion_claim",
+                "command": identity_command,
+            }
+        )
+        return gate
+
+    if k_only_variant is None or v_only_variant is None:
+        gate["status"] = "incomplete"
+        gate["reasons"].append("separated_kv_variant_names_missing")
+        gate["summary"] = (
+            "Variant records exist, but the manifest does not identify both K-only and V-only variants. "
+            "Run a generic probe only as a summary, not as the separated decision gate."
+        )
+        gate["probe_commands"].append(
+            {
+                "name": "generic_variant_summary",
+                "role": "variant_summary_not_kv_separated",
+                "command": _make_probe_command(
+                    probe_python=probe_python,
+                    tool_path=tool_path,
+                    input_path=path,
+                    output_path=_focused_output_path(root, str(job_id), "generic_variant_summary"),
+                    identity_variant_if_missing=False,
+                ),
+            }
+        )
+        return gate
+
+    gate["status"] = "ready"
+    gate["decision_state"] = "attention_error_probe_ready"
+    gate["summary"] = "Focused artifacts support separated K-only and V-only CPU offline attention-error probes."
+    for role, variant_name in (("k_only", k_only_variant), ("v_only", v_only_variant)):
+        gate["probe_commands"].append(
+            {
+                "name": f"{role}_focused_attention_error",
+                "role": role,
+                "variant_name": variant_name,
+                "command": _make_probe_command(
+                    probe_python=probe_python,
+                    tool_path=tool_path,
+                    input_path=path,
+                    output_path=_focused_output_path(root, str(job_id), role),
+                    identity_variant_if_missing=False,
+                    variant_name=variant_name,
+                ),
+            }
+        )
+    return gate
 
 
 def evaluate_readiness(
@@ -175,6 +456,11 @@ def evaluate_readiness(
     probe_python: str = DEFAULT_PROBE_PYTHON,
     probe_output: str | Path | None = None,
     tool_path: str | Path | None = None,
+    focused_layer: int = DEFAULT_FOCUSED_LAYER,
+    focused_target_head: int = DEFAULT_FOCUSED_TARGET_HEAD,
+    focused_control_head: int = DEFAULT_FOCUSED_CONTROL_HEAD,
+    focused_cached_chunk: int = DEFAULT_FOCUSED_CACHED_CHUNK,
+    focused_current_chunk: int = DEFAULT_FOCUSED_CURRENT_CHUNK,
 ) -> dict[str, Any]:
     root = Path(task_root).expanduser().resolve(strict=False)
     submission = Path(submission_path).expanduser() if submission_path else root / f"submission_{job_id}.json"
@@ -442,7 +728,9 @@ def evaluate_readiness(
             if isinstance(records, list):
                 for record in records:
                     if isinstance(record, Mapping):
-                        capture_records.append(record)
+                        record_with_path = dict(record)
+                        record_with_path["_capture_path"] = str(path) if path is not None else None
+                        capture_records.append(record_with_path)
                         if bool(record.get("has_variants")):
                             has_variant_records = True
                             chosen_capture_path = str(path)
@@ -573,6 +861,23 @@ def evaluate_readiness(
         reasons.append("no_capture_path_for_probe_command")
         artifact_ready = False
 
+    resolved_tool_path = Path(tool_path) if tool_path is not None else Path(__file__).resolve().with_name("attention_error_probe.py")
+    focused_gate = _build_focused_gate(
+        artifact_ready=artifact_ready,
+        capture_records=capture_records,
+        capture_files=capture_files,
+        has_variant_records=has_variant_records,
+        probe_python=probe_python,
+        tool_path=resolved_tool_path,
+        root=root,
+        job_id=str(job_id),
+        focused_layer=int(focused_layer),
+        focused_target_head=int(focused_target_head),
+        focused_control_head=int(focused_control_head),
+        focused_cached_chunk=int(focused_cached_chunk),
+        focused_current_chunk=int(focused_current_chunk),
+    )
+
     status = "ready" if artifact_ready else "not_ready"
     return {
         "schema_version": SCHEMA_VERSION,
@@ -592,6 +897,7 @@ def evaluate_readiness(
         "has_variant_records": bool(has_variant_records),
         "next_attention_error_probe_command": next_command,
         "next_command_note": command_note,
+        "focused_attention_error_gate": focused_gate,
         "checks": checks,
         "reasons": reasons,
         "warnings": warnings,
@@ -618,6 +924,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-quant-type", default="none")
     parser.add_argument("--probe-python", default=DEFAULT_PROBE_PYTHON)
     parser.add_argument("--probe-output", help="Override output JSON path for the next probe command")
+    parser.add_argument("--focused-layer", type=int, default=DEFAULT_FOCUSED_LAYER)
+    parser.add_argument("--focused-target-head", type=int, default=DEFAULT_FOCUSED_TARGET_HEAD)
+    parser.add_argument("--focused-control-head", type=int, default=DEFAULT_FOCUSED_CONTROL_HEAD)
+    parser.add_argument("--focused-cached-chunk", type=int, default=DEFAULT_FOCUSED_CACHED_CHUNK)
+    parser.add_argument("--focused-current-chunk", type=int, default=DEFAULT_FOCUSED_CURRENT_CHUNK)
     parser.add_argument("-o", "--output", help="Write readiness JSON to this path")
     parser.add_argument("--compact", action="store_true", help="Emit compact JSON")
     parser.add_argument("--fail-on-not-ready", action="store_true", help="Return exit code 1 when status is not ready")
@@ -656,6 +967,11 @@ def main(argv: list[str] | None = None) -> int:
             expected_quant_type=args.expected_quant_type,
             probe_python=args.probe_python,
             probe_output=args.probe_output,
+            focused_layer=args.focused_layer,
+            focused_target_head=args.focused_target_head,
+            focused_control_head=args.focused_control_head,
+            focused_cached_chunk=args.focused_cached_chunk,
+            focused_current_chunk=args.focused_current_chunk,
         )
     except Exception as exc:
         print(json.dumps({"status": "readiness_check_failed", "error": repr(exc)}), file=sys.stderr)

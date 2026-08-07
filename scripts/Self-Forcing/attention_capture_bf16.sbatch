@@ -208,6 +208,15 @@ for path in sorted(capture_dir.glob("*.pt")):
         if not isinstance(record, dict):
             continue
         metadata = record.get("metadata", {})
+        variants = record.get("variants")
+        variant_names = None
+        if isinstance(variants, dict):
+            variant_names = [str(name) for name in variants.keys()]
+        elif isinstance(variants, list):
+            variant_names = [
+                str(item.get("name", f"variant_{idx}")) if isinstance(item, dict) else str(item)
+                for idx, item in enumerate(variants)
+            ]
         record_summaries.append({
             "name": record.get("name"),
             "layer_idx": metadata.get("layer_idx"),
@@ -222,6 +231,7 @@ for path in sorted(capture_dir.glob("*.pt")):
             "cached_key_ref_shape": shape(record.get("cached_key_ref")),
             "current_key_shape": shape(record.get("current_key")),
             "has_variants": bool(record.get("variants")),
+            "variant_names": variant_names,
         })
     captures.append({
         "path": str(path.resolve()),
