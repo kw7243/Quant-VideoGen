@@ -1,5 +1,61 @@
 # Lab Notebook
 
+## 2026-08-07 - Pairing Protocol And Latent Ledger Scaffold
+
+Task: harden the paired-video metrics scaffold so future comparisons cannot
+accidentally compare artifacts from different prompts, seeds, configs, frame
+counts, checkpoints, or latent identities.
+
+Branch:
+
+```text
+fm/qvg-pairing-protocol-latent-ledger
+```
+
+Base branch:
+
+```text
+fm/qvg-video-metrics-aggregation-scaffold
+```
+
+Result:
+
+- Extended `quant_videogen/video_metrics.py::VideoEntry` with explicit pairing
+  ledger fields: prompt hash, frame count, local attention size, latent identity
+  mode/hash, scheduler config hash, checkpoint identity/hash, quant type, and
+  code commit.
+- Added `PAIRING_PROTOCOL_VERSION = "qvg_pairing_protocol_v1"` and latent
+  identity modes `inferred_seed_only` and `explicit_latent_hash`.
+- Added entry and pair validators that mark comparisons invalid before video
+  decoding when required identity fields are missing or controlled fields do
+  not match.
+- The pair validator treats prompt id/hash, seed, config id, frame count, local
+  attention size, scheduler identity, checkpoint identity, latent identity,
+  run label, and code commit as controlled fields. `quant_type` must change
+  between reference and candidate.
+- Added `qvg-video-metrics validate-manifest` to write CPU-only pairing ledger
+  and validation JSONL without reading video frames.
+- Updated `compare` records to include a `pairing_protocol` block and added
+  `invalid_pair_count` / `invalid_reasons` to aggregate summaries.
+- Added CPU-only tests for manifest happy path, invalid prompt/seed/config/frame
+  count/checkpoint/latent comparisons, explicit latent-hash versus
+  inferred-seed-only schema behavior, manifest ledger validation, and existing
+  incompatible-video-shape skip behavior.
+
+Validation:
+
+```bash
+python3 -m py_compile quant_videogen/video_metrics.py tests/test_video_metrics.py
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_video_metrics.py
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/visionreward/bin/python tests/test_video_metrics.py
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/vbench/bin/python tests/test_hqmq_fake.py
+PYTHONPATH=. /data/scratch-fast/kwen1/eval_envs/vbench/bin/python -m quant_videogen.video_metrics --help
+git diff --check
+```
+
+No Slurm jobs, GPU inference, model loads, real-video metric runs, downloads,
+main merges, or PRs were performed.
+
 ## 2026-07-24 - HQMQ Transfer Plan For Quant-VideoGen
 
 Task: plan an experimental transfer of HQMQ into Quant-VideoGen without editing

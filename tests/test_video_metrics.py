@@ -1,5 +1,6 @@
 import json
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from quant_videogen import video_metrics
@@ -44,6 +45,28 @@ def _read_jsonl(path: Path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def _entry(label: str = "bf16", quant_type: str = "bf16", **overrides):
+    values = {
+        "path": f"/tmp/{label}.mp4",
+        "label": label,
+        "prompt_id": "0",
+        "prompt_hash": "prompt-sha256",
+        "config_id": "sf-27f",
+        "seed": "123",
+        "run_label": "pair-smoke",
+        "frame_count": "105",
+        "local_attn_size": "27",
+        "initial_latent_hash": None,
+        "latent_identity_mode": video_metrics.LATENT_INFERRED_SEED_ONLY,
+        "scheduler_id": "self-forcing-dmd-default",
+        "checkpoint_id": "self_forcing_dmd.pt",
+        "quant_type": quant_type,
+        "code_commit": "abc123",
+    }
+    values.update(overrides)
+    return video_metrics.VideoEntry(**values)
+
+
 def test_inspect_missing_video_records_skip():
     with tempfile.TemporaryDirectory() as tmp:
         output = Path(tmp) / "inspect.jsonl"
@@ -79,9 +102,14 @@ def test_compare_manifest_fixture_writes_pair_and_summary():
                 "seed": "123",
                 "run_label": "fixture",
                 "motion_category": "synthetic-low-motion",
-                "num_frames": "4",
-                "initial_latent_id": "fixture-latent",
+                "frame_count": "4",
+                "local_attn_size": "4",
+                "latent_identity_mode": video_metrics.LATENT_EXPLICIT_HASH,
+                "initial_latent_hash": "fixture-latent-hash",
                 "scheduler": "fixture-scheduler",
+                "checkpoint_id": "fixture-checkpoint",
+                "quant_type": "bf16",
+                "code_commit": "fixture-commit",
             },
             {
                 "path": str(cand),
@@ -91,9 +119,14 @@ def test_compare_manifest_fixture_writes_pair_and_summary():
                 "seed": "123",
                 "run_label": "fixture",
                 "motion_category": "synthetic-low-motion",
-                "num_frames": "4",
-                "initial_latent_id": "fixture-latent",
+                "frame_count": "4",
+                "local_attn_size": "4",
+                "latent_identity_mode": video_metrics.LATENT_EXPLICIT_HASH,
+                "initial_latent_hash": "fixture-latent-hash",
                 "scheduler": "fixture-scheduler",
+                "checkpoint_id": "fixture-checkpoint",
+                "quant_type": "hqmq-fake",
+                "code_commit": "fixture-commit",
             },
         ]
         manifest.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -128,10 +161,20 @@ def test_compare_manifest_fixture_writes_pair_and_summary():
         }
         assert pair["controlled_fields"] == {
             "prompt_category": "synthetic-low-motion",
-            "rollout_length": "4",
-            "initial_latent_id": "fixture-latent",
+            "rollout_length": None,
+            "frame_count": "4",
+            "local_attn_size": "4",
+            "initial_latent_id": None,
+            "initial_latent_hash": "fixture-latent-hash",
+            "latent_identity_mode": video_metrics.LATENT_EXPLICIT_HASH,
             "scheduler_id": "fixture-scheduler",
+            "scheduler_config_hash": None,
+            "checkpoint_id": "fixture-checkpoint",
+            "checkpoint_hash": None,
+            "code_commit": "fixture-commit",
         }
+        assert pair["pairing_protocol"]["status"] == "ok"
+        assert pair["pairing_protocol"]["reference"]["latent_identity_mode"] == video_metrics.LATENT_EXPLICIT_HASH
         assert pair["reference"]["media"]["width"] == 16
         assert pair["candidate"]["media"]["frame_count"] == 4
         assert pair["metrics"]["frame_count"] == 4
@@ -144,7 +187,95 @@ def test_compare_manifest_fixture_writes_pair_and_summary():
         assert aggregate["research_stage"] == video_metrics.STAGE3_ROLLOUT
         assert aggregate["ok_pair_count"] == 1
         assert aggregate["skip_pair_count"] == 0
+        assert aggregate["invalid_pair_count"] == 0
         assert json.loads(summary.read_text())["metrics"]["mse"]["count"] == 1
+
+
+def test_pairing_protocol_rejects_identity_mismatches_before_video_decode():
+    reference = _entry()
+    mismatches = [
+        (replace(_entry(label="hqmq", quant_type="hqmq-fake"), prompt_id="1"), "prompt_id_mismatch"),
+        (replace(_entry(label="hqmq", quant_type="hqmq-fake"), seed="124"), "seed_mismatch"),
+        (replace(_entry(label="hqmq", quant_type="hqmq-fake"), config_id="sf-81f"), "config_id_mismatch"),
+        (replace(_entry(label="hqmq", quant_type="hqmq-fake"), frame_count="104"), "frame_count_mismatch"),
+        (replace(_entry(label="hqmq", quant_type="hqmq-fake"), checkpoint_id="other.pt"), "checkpoint_id_mismatch"),
+        (
+            replace(
+                _entry(label="hqmq", quant_type="hqmq-fake"),
+                latent_identity_mode=video_metrics.LATENT_EXPLICIT_HASH,
+                initial_latent_hash="latent-hash",
+            ),
+            "latent_identity_mode_mismatch",
+        ),
+    ]
+
+    for candidate, expected_issue in mismatches:
+        record = video_metrics.compare_entries(reference, candidate)
+        assert record["status"] == "invalid"
+        assert record["invalid_reason"] == "invalid_pairing_protocol"
+        assert expected_issue in record["pairing_protocol"]["issues"]
+        assert record["reference"].get("media") is None
+        assert record["candidate"].get("media") is None
+
+
+def test_latent_identity_modes_are_explicit_in_schema():
+    reference = _entry(
+        latent_identity_mode=video_metrics.LATENT_EXPLICIT_HASH,
+        initial_latent_hash="latent-hash",
+    )
+    candidate = _entry(
+        label="hqmq",
+        quant_type="hqmq-fake",
+        latent_identity_mode=video_metrics.LATENT_EXPLICIT_HASH,
+        initial_latent_hash="latent-hash",
+    )
+    assert video_metrics.validate_pair_identity(reference, candidate)["status"] == "ok"
+
+    candidate = replace(candidate, initial_latent_hash="other-latent")
+    protocol = video_metrics.validate_pair_identity(reference, candidate)
+    assert protocol["status"] == "invalid"
+    assert "initial_latent_hash_mismatch" in protocol["issues"]
+
+    candidate = replace(candidate, latent_identity_mode=video_metrics.LATENT_EXPLICIT_HASH, initial_latent_hash=None)
+    protocol = video_metrics.validate_pair_identity(reference, candidate)
+    assert protocol["status"] == "invalid"
+    assert "candidate_missing_explicit_latent_hash" in protocol["issues"]
+
+
+def test_validate_manifest_writes_pairing_ledger_without_video_decode():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        manifest = tmp_path / "manifest.jsonl"
+        rows = [
+            _entry(path=str(tmp_path / "missing_ref.mp4")).pairing_ledger() | {"label": "bf16"},
+            _entry(path=str(tmp_path / "missing_cand.mp4"), label="hqmq", quant_type="hqmq-fake").pairing_ledger() | {"label": "hqmq"},
+        ]
+        manifest.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        output = tmp_path / "pairing.jsonl"
+        summary = tmp_path / "pairing-summary.json"
+        rc = video_metrics.main(
+            [
+                "validate-manifest",
+                "--manifest",
+                str(manifest),
+                "--output-jsonl",
+                str(output),
+                "--summary-json",
+                str(summary),
+            ]
+        )
+        assert rc == 0
+        records = _read_jsonl(output)
+        assert [record["record_type"] for record in records] == [
+            "pairing_ledger_entry",
+            "pairing_ledger_entry",
+            "pairing_validation",
+            "pairing_validation_summary",
+        ]
+        assert records[2]["status"] == "ok"
+        assert not records[0]["entry"]["artifact_path"].endswith("exists.mp4")
+        assert json.loads(summary.read_text())["status_counts"]["ok"] == 3
 
 
 def test_compare_mismatched_frames_records_skip():
@@ -171,6 +302,30 @@ def test_compare_mismatched_frames_records_skip():
                 str(cand),
                 "--candidate-label",
                 "qvg",
+                "--reference-quant-type",
+                "bf16",
+                "--candidate-quant-type",
+                "qvg",
+                "--prompt-id",
+                "0",
+                "--config-id",
+                "fixture",
+                "--seed",
+                "123",
+                "--run-label",
+                "fixture",
+                "--frame-count",
+                "4",
+                "--local-attn-size",
+                "4",
+                "--latent-identity-mode",
+                video_metrics.LATENT_INFERRED_SEED_ONLY,
+                "--scheduler-id",
+                "fixture-scheduler",
+                "--checkpoint-id",
+                "fixture-checkpoint",
+                "--code-commit",
+                "fixture-commit",
                 "--output-jsonl",
                 str(output),
             ]
@@ -180,9 +335,13 @@ def test_compare_mismatched_frames_records_skip():
         assert records[0]["status"] == "skip"
         assert records[0]["skip_reason"] == "incompatible_video_shapes"
         assert records[1]["skip_pair_count"] == 1
+        assert records[1]["invalid_pair_count"] == 0
 
 
 if __name__ == "__main__":
     test_inspect_missing_video_records_skip()
     test_compare_manifest_fixture_writes_pair_and_summary()
+    test_pairing_protocol_rejects_identity_mismatches_before_video_decode()
+    test_latent_identity_modes_are_explicit_in_schema()
+    test_validate_manifest_writes_pairing_ledger_without_video_decode()
     test_compare_mismatched_frames_records_skip()

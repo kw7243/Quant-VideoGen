@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 from collections import Counter, defaultdict
@@ -16,6 +17,10 @@ PAIR_KEY_FIELDS = ("prompt_id", "config_id", "seed", "run_label")
 DEFAULT_REFERENCE_LABEL = "bf16"
 STAGE0_INFRASTRUCTURE = "stage0_infrastructure_validation"
 STAGE3_ROLLOUT = "stage3_controlled_rollout_comparison"
+PAIRING_PROTOCOL_VERSION = "qvg_pairing_protocol_v1"
+LATENT_INFERRED_SEED_ONLY = "inferred_seed_only"
+LATENT_EXPLICIT_HASH = "explicit_latent_hash"
+LATENT_IDENTITY_MODES = (LATENT_INFERRED_SEED_ONLY, LATENT_EXPLICIT_HASH)
 
 
 @dataclass(frozen=True)
@@ -24,17 +29,27 @@ class VideoEntry:
     label: str
     prompt_id: str | None = None
     prompt: str | None = None
+    prompt_hash: str | None = None
     config_id: str | None = None
     seed: str | None = None
     run_label: str | None = None
     prompt_category: str | None = None
     rollout_length: str | None = None
+    frame_count: str | None = None
+    local_attn_size: str | None = None
     initial_latent_id: str | None = None
+    initial_latent_hash: str | None = None
+    latent_identity_mode: str | None = None
     scheduler_id: str | None = None
+    scheduler_config_hash: str | None = None
+    checkpoint_id: str | None = None
+    checkpoint_hash: str | None = None
+    quant_type: str | None = None
+    code_commit: str | None = None
 
     @classmethod
     def from_mapping(cls, row: dict[str, Any]) -> "VideoEntry":
-        path = row.get("path") or row.get("video_path") or row.get("file")
+        path = row.get("path") or row.get("artifact_path") or row.get("video_path") or row.get("file")
         label = row.get("label") or row.get("variant") or row.get("quant_type") or row.get("method")
         if not path:
             raise ValueError(f"manifest row is missing a video path field: {row}")
@@ -45,17 +60,66 @@ class VideoEntry:
             label=str(label),
             prompt_id=_optional_str(row.get("prompt_id", row.get("idx"))),
             prompt=_optional_str(row.get("prompt")),
+            prompt_hash=_optional_str(row.get("prompt_hash", row.get("prompt_sha256"))),
             config_id=_optional_str(row.get("config_id", row.get("config"))),
             seed=_optional_str(row.get("seed")),
             run_label=_optional_str(row.get("run_label", row.get("run"))),
             prompt_category=_optional_str(row.get("prompt_category", row.get("motion_category"))),
             rollout_length=_optional_str(row.get("rollout_length", row.get("num_frames"))),
+            frame_count=_optional_str(row.get("frame_count", row.get("num_frames", row.get("rollout_length")))),
+            local_attn_size=_optional_str(row.get("local_attn_size", row.get("local_attention_size"))),
             initial_latent_id=_optional_str(row.get("initial_latent_id")),
+            initial_latent_hash=_optional_str(row.get("initial_latent_hash", row.get("latent_hash"))),
+            latent_identity_mode=_optional_str(row.get("latent_identity_mode", row.get("latent_mode"))),
             scheduler_id=_optional_str(row.get("scheduler_id", row.get("scheduler"))),
+            scheduler_config_hash=_optional_str(row.get("scheduler_config_hash", row.get("scheduler_hash"))),
+            checkpoint_id=_optional_str(row.get("checkpoint_id", row.get("checkpoint", row.get("checkpoint_path")))),
+            checkpoint_hash=_optional_str(row.get("checkpoint_hash", row.get("checkpoint_sha256"))),
+            quant_type=_optional_str(row.get("quant_type", row.get("method", row.get("variant", label)))),
+            code_commit=_optional_str(row.get("code_commit", row.get("git_commit", row.get("git_commit_full")))),
         )
 
     def pair_key(self) -> dict[str, str | None]:
         return {field: getattr(self, field) for field in PAIR_KEY_FIELDS}
+
+    def canonical_prompt_hash(self) -> str | None:
+        return self.prompt_hash or _sha256_text(self.prompt)
+
+    def scheduler_identity(self) -> str | None:
+        return _joined_identity(("scheduler_id", self.scheduler_id), ("scheduler_config_hash", self.scheduler_config_hash))
+
+    def checkpoint_identity(self) -> str | None:
+        return _joined_identity(("checkpoint_id", self.checkpoint_id), ("checkpoint_hash", self.checkpoint_hash))
+
+    def latent_identity(self) -> str | None:
+        if self.latent_identity_mode == LATENT_INFERRED_SEED_ONLY:
+            return LATENT_INFERRED_SEED_ONLY
+        if self.latent_identity_mode == LATENT_EXPLICIT_HASH:
+            return _joined_identity(("initial_latent_hash", self.initial_latent_hash), ("initial_latent_id", self.initial_latent_id))
+        return None
+
+    def pairing_ledger(self) -> dict[str, Any]:
+        return {
+            "pairing_protocol_version": PAIRING_PROTOCOL_VERSION,
+            "artifact_path": self.path,
+            "label": self.label,
+            "quant_type": self.quant_type,
+            "prompt_id": self.prompt_id,
+            "prompt_hash": self.canonical_prompt_hash(),
+            "seed": self.seed,
+            "latent_identity_mode": self.latent_identity_mode,
+            "initial_latent_id": self.initial_latent_id,
+            "initial_latent_hash": self.initial_latent_hash,
+            "scheduler_id": self.scheduler_id,
+            "scheduler_config_hash": self.scheduler_config_hash,
+            "config_id": self.config_id,
+            "checkpoint_id": self.checkpoint_id,
+            "checkpoint_hash": self.checkpoint_hash,
+            "frame_count": self.frame_count,
+            "local_attn_size": self.local_attn_size,
+            "run_label": self.run_label,
+            "code_commit": self.code_commit,
+        }
 
 
 def _optional_str(value: Any) -> str | None:
@@ -63,6 +127,128 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value)
     return text if text != "" else None
+
+
+def _sha256_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _joined_identity(*parts: tuple[str, str | None]) -> str | None:
+    present = [f"{name}:{value}" for name, value in parts if value]
+    return "|".join(present) if present else None
+
+
+def validate_entry_identity(entry: VideoEntry) -> list[str]:
+    issues: list[str] = []
+    if not entry.path:
+        issues.append("missing_artifact_path")
+    if not (entry.prompt_id or entry.canonical_prompt_hash()):
+        issues.append("missing_prompt_identity")
+    if not entry.seed:
+        issues.append("missing_seed")
+    if not entry.config_id:
+        issues.append("missing_config_id")
+    if not entry.run_label:
+        issues.append("missing_run_label")
+    if not entry.frame_count:
+        issues.append("missing_frame_count")
+    if not entry.local_attn_size:
+        issues.append("missing_local_attn_size")
+    if not entry.quant_type:
+        issues.append("missing_quant_type")
+    if not entry.code_commit:
+        issues.append("missing_code_commit")
+    if not entry.scheduler_identity():
+        issues.append("missing_scheduler_identity")
+    if not entry.checkpoint_identity():
+        issues.append("missing_checkpoint_identity")
+
+    if not entry.latent_identity_mode:
+        issues.append("missing_latent_identity_mode")
+    elif entry.latent_identity_mode not in LATENT_IDENTITY_MODES:
+        issues.append(f"invalid_latent_identity_mode:{entry.latent_identity_mode}")
+    elif entry.latent_identity_mode == LATENT_EXPLICIT_HASH and not entry.latent_identity():
+        issues.append("missing_explicit_latent_hash")
+
+    return issues
+
+
+def validate_pair_identity(reference: VideoEntry, candidate: VideoEntry) -> dict[str, Any]:
+    issues: list[str] = []
+    ref_issues = validate_entry_identity(reference)
+    cand_issues = validate_entry_identity(candidate)
+    for issue in ref_issues:
+        issues.append(f"reference_{issue}")
+    for issue in cand_issues:
+        issues.append(f"candidate_{issue}")
+
+    issues.extend(_compare_prompt_identity(reference, candidate))
+    issues.extend(_compare_identity_family(reference, candidate, "scheduler", "scheduler_id", "scheduler_config_hash"))
+    issues.extend(_compare_identity_family(reference, candidate, "checkpoint", "checkpoint_id", "checkpoint_hash"))
+    issues.extend(_compare_latent_identity(reference, candidate))
+
+    for field in ("seed", "config_id", "frame_count", "local_attn_size", "run_label", "code_commit"):
+        ref_value = getattr(reference, field)
+        cand_value = getattr(candidate, field)
+        if ref_value and cand_value and ref_value != cand_value:
+            issues.append(f"{field}_mismatch")
+
+    if reference.quant_type and candidate.quant_type and reference.quant_type == candidate.quant_type:
+        issues.append("quant_type_not_changed")
+
+    return {
+        "pairing_protocol_version": PAIRING_PROTOCOL_VERSION,
+        "status": "invalid" if issues else "ok",
+        "issues": issues,
+        "reference": reference.pairing_ledger(),
+        "candidate": candidate.pairing_ledger(),
+    }
+
+
+def _compare_prompt_identity(reference: VideoEntry, candidate: VideoEntry) -> list[str]:
+    issues: list[str] = []
+    ref_hash = reference.canonical_prompt_hash()
+    cand_hash = candidate.canonical_prompt_hash()
+    shared_identity = False
+    if reference.prompt_id and candidate.prompt_id:
+        shared_identity = True
+        if reference.prompt_id != candidate.prompt_id:
+            issues.append("prompt_id_mismatch")
+    if ref_hash and cand_hash:
+        shared_identity = True
+        if ref_hash != cand_hash:
+            issues.append("prompt_hash_mismatch")
+    if (reference.prompt_id or ref_hash) and (candidate.prompt_id or cand_hash) and not shared_identity:
+        issues.append("prompt_identity_not_comparable")
+    return issues
+
+
+def _compare_identity_family(reference: VideoEntry, candidate: VideoEntry, family: str, *fields: str) -> list[str]:
+    issues: list[str] = []
+    shared_identity = False
+    for field in fields:
+        ref_value = getattr(reference, field)
+        cand_value = getattr(candidate, field)
+        if ref_value and cand_value:
+            shared_identity = True
+            if ref_value != cand_value:
+                issues.append(f"{field}_mismatch")
+    if any(getattr(reference, field) for field in fields) and any(getattr(candidate, field) for field in fields) and not shared_identity:
+        issues.append(f"{family}_identity_not_comparable")
+    return issues
+
+
+def _compare_latent_identity(reference: VideoEntry, candidate: VideoEntry) -> list[str]:
+    issues: list[str] = []
+    if reference.latent_identity_mode and candidate.latent_identity_mode:
+        if reference.latent_identity_mode != candidate.latent_identity_mode:
+            issues.append("latent_identity_mode_mismatch")
+            return issues
+        if reference.latent_identity_mode == LATENT_EXPLICIT_HASH:
+            issues.extend(_compare_identity_family(reference, candidate, "latent", "initial_latent_hash", "initial_latent_id"))
+    return issues
 
 
 def _jsonable_number(value: float | int | None) -> float | int | None:
@@ -199,6 +385,7 @@ def load_video_frames(path: str | Path) -> Any:
 
 
 def compare_entries(reference: VideoEntry, candidate: VideoEntry) -> dict[str, Any]:
+    pairing_protocol = validate_pair_identity(reference, candidate)
     record = {
         "record_type": "pair_metrics",
         "research_stage": STAGE3_ROLLOUT,
@@ -210,14 +397,26 @@ def compare_entries(reference: VideoEntry, candidate: VideoEntry) -> dict[str, A
         "controlled_fields": {
             "prompt_category": reference.prompt_category,
             "rollout_length": reference.rollout_length,
+            "frame_count": reference.frame_count,
+            "local_attn_size": reference.local_attn_size,
             "initial_latent_id": reference.initial_latent_id,
+            "initial_latent_hash": reference.initial_latent_hash,
+            "latent_identity_mode": reference.latent_identity_mode,
             "scheduler_id": reference.scheduler_id,
+            "scheduler_config_hash": reference.scheduler_config_hash,
+            "checkpoint_id": reference.checkpoint_id,
+            "checkpoint_hash": reference.checkpoint_hash,
+            "code_commit": reference.code_commit,
         },
+        "pairing_protocol": pairing_protocol,
         "metrics": {},
         "skipped_metrics": [],
     }
     if reference.prompt:
         record["prompt"] = reference.prompt
+
+    if pairing_protocol["status"] != "ok":
+        return _invalid_record(record, "invalid_pairing_protocol")
 
     ref_meta = inspect_video(reference.path)
     cand_meta = inspect_video(candidate.path)
@@ -327,6 +526,11 @@ def aggregate_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         for record in records
         if record.get("record_type") == "pair_metrics" and record.get("status") == "skip"
     )
+    invalid_reasons = Counter(
+        record.get("invalid_reason", "unknown")
+        for record in records
+        if record.get("record_type") == "pair_metrics" and record.get("status") == "invalid"
+    )
     numeric: dict[str, list[float]] = defaultdict(list)
     for record in ok_records:
         for key, value in record.get("metrics", {}).items():
@@ -350,8 +554,33 @@ def aggregate_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "pair_count": len([record for record in records if record.get("record_type") == "pair_metrics"]),
         "ok_pair_count": len(ok_records),
         "skip_pair_count": sum(skip_reasons.values()),
+        "invalid_pair_count": sum(invalid_reasons.values()),
         "skip_reasons": dict(sorted(skip_reasons.items())),
+        "invalid_reasons": dict(sorted(invalid_reasons.items())),
         "metrics": metrics,
+    }
+
+
+def _pairing_validation_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    statuses = Counter(record.get("status", "unknown") for record in records)
+    invalid_reasons = Counter(
+        record.get("invalid_reason", "unknown")
+        for record in records
+        if record.get("status") == "invalid" and record.get("invalid_reason")
+    )
+    skip_reasons = Counter(
+        record.get("skip_reason", "unknown")
+        for record in records
+        if record.get("status") == "skip" and record.get("skip_reason")
+    )
+    return {
+        "record_type": "pairing_validation_summary",
+        "research_stage": STAGE3_ROLLOUT,
+        "status": "ok" if not statuses.get("invalid") else "invalid",
+        "record_count": len(records),
+        "status_counts": dict(sorted(statuses.items())),
+        "invalid_reasons": dict(sorted(invalid_reasons.items())),
+        "skip_reasons": dict(sorted(skip_reasons.items())),
     }
 
 
@@ -383,37 +612,110 @@ def compare_command(args: argparse.Namespace) -> int:
             for item in pair_items
         ]
     else:
+        frame_count = args.frame_count or args.rollout_length
         reference = VideoEntry(
             path=args.reference,
             label=args.reference_label,
             prompt_id=args.prompt_id,
             prompt=args.prompt,
+            prompt_hash=args.prompt_hash,
             config_id=args.config_id,
             seed=args.seed,
             run_label=args.run_label,
             prompt_category=args.prompt_category,
             rollout_length=args.rollout_length,
+            frame_count=frame_count,
+            local_attn_size=args.local_attn_size,
             initial_latent_id=args.initial_latent_id,
+            initial_latent_hash=args.initial_latent_hash,
+            latent_identity_mode=args.latent_identity_mode,
             scheduler_id=args.scheduler_id,
+            scheduler_config_hash=args.scheduler_config_hash,
+            checkpoint_id=args.checkpoint_id,
+            checkpoint_hash=args.checkpoint_hash,
+            quant_type=args.reference_quant_type or args.reference_label,
+            code_commit=args.code_commit,
         )
         candidate = VideoEntry(
             path=args.candidate,
             label=args.candidate_label,
             prompt_id=args.prompt_id,
             prompt=args.prompt,
+            prompt_hash=args.prompt_hash,
             config_id=args.config_id,
             seed=args.seed,
             run_label=args.run_label,
             prompt_category=args.prompt_category,
             rollout_length=args.rollout_length,
+            frame_count=frame_count,
+            local_attn_size=args.local_attn_size,
             initial_latent_id=args.initial_latent_id,
+            initial_latent_hash=args.initial_latent_hash,
+            latent_identity_mode=args.latent_identity_mode,
             scheduler_id=args.scheduler_id,
+            scheduler_config_hash=args.scheduler_config_hash,
+            checkpoint_id=args.checkpoint_id,
+            checkpoint_hash=args.checkpoint_hash,
+            quant_type=args.candidate_quant_type or args.candidate_label,
+            code_commit=args.code_commit,
         )
         records = [compare_entries(reference, candidate)]
 
     summary = aggregate_records(records)
     records_with_summary = records + [summary]
     _write_jsonl(records_with_summary, args.output_jsonl)
+    if args.summary_json:
+        _write_json(args.summary_json, summary)
+    return 0
+
+
+def validate_manifest_command(args: argparse.Namespace) -> int:
+    entries = read_manifest(args.manifest)
+    records = []
+    for entry in entries:
+        issues = validate_entry_identity(entry)
+        records.append(
+            {
+                "record_type": "pairing_ledger_entry",
+                "research_stage": STAGE3_ROLLOUT,
+                "metric_scope": "paired_artifact_identity",
+                "status": "invalid" if issues else "ok",
+                "issues": issues,
+                "entry": entry.pairing_ledger(),
+            }
+        )
+
+    pair_items = build_pairs(entries, args.reference_label)
+    for item in pair_items:
+        if isinstance(item, dict):
+            records.append(
+                {
+                    "record_type": "pairing_validation",
+                    "research_stage": STAGE3_ROLLOUT,
+                    "metric_scope": "paired_artifact_identity",
+                    "status": "skip",
+                    "skip_reason": item["skip_reason"],
+                    "pair_key": item["pair_key"],
+                    "entries": item["entries"],
+                }
+            )
+            continue
+        reference, candidate = item
+        protocol = validate_pair_identity(reference, candidate)
+        records.append(
+            {
+                "record_type": "pairing_validation",
+                "research_stage": STAGE3_ROLLOUT,
+                "metric_scope": "paired_artifact_identity",
+                "status": protocol["status"],
+                "invalid_reason": "invalid_pairing_protocol" if protocol["status"] == "invalid" else None,
+                "pair_key": reference.pair_key(),
+                "pairing_protocol": protocol,
+            }
+        )
+
+    summary = _pairing_validation_summary(records)
+    _write_jsonl(records + [summary], args.output_jsonl)
     if args.summary_json:
         _write_json(args.summary_json, summary)
     return 0
@@ -435,18 +737,36 @@ def main(argv: list[str] | None = None) -> int:
     compare_parser.add_argument("--candidate", help="Candidate video path for explicit one-pair mode.")
     compare_parser.add_argument("--reference-label", default=DEFAULT_REFERENCE_LABEL, help="Reference label. Default: bf16.")
     compare_parser.add_argument("--candidate-label", default="candidate", help="Candidate label for explicit one-pair mode.")
+    compare_parser.add_argument("--reference-quant-type", help="Reference quant/cache type. Defaults to --reference-label.")
+    compare_parser.add_argument("--candidate-quant-type", help="Candidate quant/cache type. Defaults to --candidate-label.")
     compare_parser.add_argument("--prompt-id")
     compare_parser.add_argument("--prompt")
+    compare_parser.add_argument("--prompt-hash")
     compare_parser.add_argument("--config-id")
     compare_parser.add_argument("--seed")
     compare_parser.add_argument("--run-label")
     compare_parser.add_argument("--prompt-category")
     compare_parser.add_argument("--rollout-length")
+    compare_parser.add_argument("--frame-count")
+    compare_parser.add_argument("--local-attn-size")
     compare_parser.add_argument("--initial-latent-id")
+    compare_parser.add_argument("--initial-latent-hash")
+    compare_parser.add_argument("--latent-identity-mode", choices=LATENT_IDENTITY_MODES)
     compare_parser.add_argument("--scheduler-id")
+    compare_parser.add_argument("--scheduler-config-hash")
+    compare_parser.add_argument("--checkpoint-id")
+    compare_parser.add_argument("--checkpoint-hash")
+    compare_parser.add_argument("--code-commit")
     compare_parser.add_argument("--output-jsonl", help="Optional JSONL output path.")
     compare_parser.add_argument("--summary-json", help="Optional aggregate summary JSON path.")
     compare_parser.set_defaults(func=compare_command)
+
+    validate_parser = subparsers.add_parser("validate-manifest", help="Validate pairing identity fields without decoding videos.")
+    validate_parser.add_argument("--manifest", required=True, help="JSONL or CSV manifest to validate.")
+    validate_parser.add_argument("--reference-label", default=DEFAULT_REFERENCE_LABEL, help="Reference label. Default: bf16.")
+    validate_parser.add_argument("--output-jsonl", help="Optional JSONL ledger output path.")
+    validate_parser.add_argument("--summary-json", help="Optional validation summary JSON path.")
+    validate_parser.set_defaults(func=validate_manifest_command)
 
     args = parser.parse_args(argv)
     if args.command == "compare" and not args.manifest and not args.candidate:
@@ -471,6 +791,16 @@ def _group_skip(pair_key: dict[str, str | None], reason: str, entries: list[Vide
 def _skip_record(record: dict[str, Any], reason: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     record["status"] = "skip"
     record["skip_reason"] = reason
+    record["metrics"] = {}
+    record["skipped_metrics"] = ["all"]
+    if extra:
+        record.update(extra)
+    return record
+
+
+def _invalid_record(record: dict[str, Any], reason: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    record["status"] = "invalid"
+    record["invalid_reason"] = reason
     record["metrics"] = {}
     record["skipped_metrics"] = ["all"]
     if extra:
