@@ -1,0 +1,423 @@
+{
+  "answers": {
+    "chunk_26_radius_proxy_jump": "not chunk-26-only; low at chunk 23 then jumps at chunk 24 and remains high through chunks 25 and 26",
+    "head_0_control": "not another layer-29 anomaly; layer 29 K head 0 is about one quarter of head 9 p95, though layer 28 K head 0 is the second-highest control-like elevation",
+    "kv_asymmetry": "same direction as broad subset: K has higher norm/radius-outlier/radius-proxy error; V has higher temporal relative delta",
+    "layer_29_k_head_9_dominance": "yes_by_vector_norm_p95; stable high magnitude over chunks 23-26; not a within-head Med3 outlier because the head is uniformly high",
+    "next_functional_probe_after_1316140": "inspect the attention-capture manifest, then run one CPU offline attention-error probe on captured layer 29 head 9 across the chunk 23->24 transition with head 0 as control and K-only/V-only variants before any video-quality claim"
+  },
+  "byte_guards": {
+    "max_subset_bytes": 134217728,
+    "selected_estimated_bytes": 19169280,
+    "subset_file_size_bytes": 19182930
+  },
+  "chunk_summary": {
+    "23": {
+      "radius_only_rel_l2_bits4_mean": 0.001434,
+      "temporal_relative_delta_p95_mean": 0.985687,
+      "tensor_count": 6,
+      "tuple4_radius_outlier_fraction_mean": 0.111619,
+      "tuple4_radius_p95_mean": 7.173986,
+      "vector_norm_p95_mean": 38.744183
+    },
+    "24": {
+      "radius_only_rel_l2_bits4_mean": 0.047553,
+      "temporal_relative_delta_p95_mean": 0.967291,
+      "tensor_count": 6,
+      "tuple4_radius_outlier_fraction_mean": 0.110522,
+      "tuple4_radius_p95_mean": 7.144754,
+      "vector_norm_p95_mean": 38.45654
+    },
+    "25": {
+      "radius_only_rel_l2_bits4_mean": 0.047646,
+      "temporal_relative_delta_p95_mean": 0.963457,
+      "tensor_count": 6,
+      "tuple4_radius_outlier_fraction_mean": 0.111877,
+      "tuple4_radius_p95_mean": 7.128849,
+      "vector_norm_p95_mean": 38.343712
+    },
+    "26": {
+      "radius_only_rel_l2_bits4_mean": 0.047883,
+      "temporal_relative_delta_p95_mean": 0.96315,
+      "tensor_count": 6,
+      "tuple4_radius_outlier_fraction_mean": 0.111781,
+      "tuple4_radius_p95_mean": 7.086459,
+      "vector_norm_p95_mean": 38.269569
+    }
+  },
+  "layer_role_summary": {
+    "self_attention:layer_27:key": {
+      "radius_only_rel_l2_bits4_mean": 0.043151,
+      "tensor_count": 4,
+      "tuple4_radius_outlier_fraction_mean": 0.191829,
+      "tuple4_radius_p95_mean": 6.697917,
+      "vector_norm_p95_max": 25.876453,
+      "vector_norm_p95_mean": 25.704721
+    },
+    "self_attention:layer_27:value": {
+      "radius_only_rel_l2_bits4_mean": 0.024796,
+      "tensor_count": 4,
+      "tuple4_radius_outlier_fraction_mean": 0.002376,
+      "tuple4_radius_p95_mean": 3.790668,
+      "vector_norm_p95_max": 17.862734,
+      "vector_norm_p95_mean": 17.565808
+    },
+    "self_attention:layer_28:key": {
+      "radius_only_rel_l2_bits4_mean": 0.047592,
+      "tensor_count": 4,
+      "tuple4_radius_outlier_fraction_mean": 0.184362,
+      "tuple4_radius_p95_mean": 9.824484,
+      "vector_norm_p95_max": 35.744576,
+      "vector_norm_p95_mean": 35.480159
+    },
+    "self_attention:layer_28:value": {
+      "radius_only_rel_l2_bits4_mean": 0.025167,
+      "tensor_count": 4,
+      "tuple4_radius_outlier_fraction_mean": 0.000511,
+      "tuple4_radius_p95_mean": 4.605645,
+      "vector_norm_p95_max": 21.142773,
+      "vector_norm_p95_mean": 20.780783
+    },
+    "self_attention:layer_29:key": {
+      "radius_only_rel_l2_bits4_mean": 0.051075,
+      "tensor_count": 4,
+      "tuple4_radius_outlier_fraction_mean": 0.289338,
+      "tuple4_radius_p95_mean": 12.102404,
+      "vector_norm_p95_max": 105.474464,
+      "vector_norm_p95_mean": 105.082951
+    },
+    "self_attention:layer_29:value": {
+      "radius_only_rel_l2_bits4_mean": 0.024993,
+      "tensor_count": 4,
+      "tuple4_radius_outlier_fraction_mean": 0.00028,
+      "tuple4_radius_p95_mean": 5.779956,
+      "vector_norm_p95_max": 26.364096,
+      "vector_norm_p95_mean": 26.106586
+    }
+  },
+  "role_summary": {
+    "key": {
+      "radius_only_rel_l2_bits4_mean": 0.047273,
+      "temporal_relative_delta_p95_mean": 0.529423,
+      "tensor_count": 12,
+      "tuple4_radius_outlier_fraction_mean": 0.221843,
+      "vector_norm_p95_mean": 55.42261
+    },
+    "value": {
+      "radius_only_rel_l2_bits4_mean": 0.024985,
+      "temporal_relative_delta_p95_mean": 1.410369,
+      "tensor_count": 12,
+      "tuple4_radius_outlier_fraction_mean": 0.001056,
+      "vector_norm_p95_mean": 21.484392
+    }
+  },
+  "schema_version": "qvg-focused-cache-anomaly-findings.v1",
+  "selection": {
+    "cache_kind": "self_attention",
+    "chunks": [
+      23,
+      24,
+      25,
+      26
+    ],
+    "heads": [
+      0,
+      9
+    ],
+    "layers": [
+      27,
+      28,
+      29
+    ],
+    "roles": [
+      "key",
+      "value"
+    ]
+  },
+  "source_manifest": "analysis/cache_audit_frames27_focused_subset_manifest.json",
+  "source_stats": "analysis/cache_audit_frames27_focused_bounded_stats.json",
+  "staged_runs": [
+    "/afs/csail.mit.edu/u/k/kwen1/.treehouse/quant-videogen-d60f5d/7/quant-videogen/staging/20260806_230053-36720c-118e8ab-code",
+    "/afs/csail.mit.edu/u/k/kwen1/.treehouse/quant-videogen-d60f5d/7/quant-videogen/staging/20260806_230149-5bbdd1-118e8ab-code"
+  ],
+  "stats_load": {
+    "max_full_load_bytes": 134217728,
+    "max_tensor_stat_bytes": 16777216,
+    "max_total_stat_bytes": 134217728,
+    "metadata_load_errors": [],
+    "metadata_load_mode": "fake_tensor_weights_only",
+    "pickle_trusted": false,
+    "stats_decision": {
+      "compute_stats": true,
+      "reason": "artifact within auto stats byte guards"
+    },
+    "stats_load_errors": [],
+    "stats_load_mode": "cpu_weights_only_mmap",
+    "stats_mode": "auto",
+    "stats_pickle_trusted": false,
+    "status": "stats_computed",
+    "trust_pickle": true
+  },
+  "transition_23_to_24": [
+    {
+      "cache_kind": "self_attention",
+      "kv_role": "key",
+      "layer_idx": 27,
+      "radius_only_rel_l2_bits4_delta": 0.055086,
+      "radius_only_rel_l2_bits4_ratio": 34.403675,
+      "tuple4_radius_p95_delta": 0.072173,
+      "vector_norm_p95_delta": -0.15634
+    },
+    {
+      "cache_kind": "self_attention",
+      "kv_role": "value",
+      "layer_idx": 27,
+      "radius_only_rel_l2_bits4_delta": 0.030872,
+      "radius_only_rel_l2_bits4_ratio": 20.254426,
+      "tuple4_radius_p95_delta": -0.110048,
+      "vector_norm_p95_delta": -0.26906
+    },
+    {
+      "cache_kind": "self_attention",
+      "kv_role": "key",
+      "layer_idx": 28,
+      "radius_only_rel_l2_bits4_delta": 0.060976,
+      "radius_only_rel_l2_bits4_ratio": 47.875075,
+      "tuple4_radius_p95_delta": 0.039698,
+      "vector_norm_p95_delta": -0.378048
+    },
+    {
+      "cache_kind": "self_attention",
+      "kv_role": "value",
+      "layer_idx": 28,
+      "radius_only_rel_l2_bits4_delta": 0.031367,
+      "radius_only_rel_l2_bits4_ratio": 20.451324,
+      "tuple4_radius_p95_delta": -0.143661,
+      "vector_norm_p95_delta": -0.368618
+    },
+    {
+      "cache_kind": "self_attention",
+      "kv_role": "key",
+      "layer_idx": 29,
+      "radius_only_rel_l2_bits4_delta": 0.06721,
+      "radius_only_rel_l2_bits4_ratio": 79.932162,
+      "tuple4_radius_p95_delta": 0.115535,
+      "vector_norm_p95_delta": -0.466362
+    },
+    {
+      "cache_kind": "self_attention",
+      "kv_role": "value",
+      "layer_idx": 29,
+      "radius_only_rel_l2_bits4_delta": 0.031204,
+      "radius_only_rel_l2_bits4_ratio": 20.669963,
+      "tuple4_radius_p95_delta": -0.149087,
+      "vector_norm_p95_delta": -0.087425
+    }
+  ],
+  "worst_heads_by_vector_norm_p95": [
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 9,
+      "kv_role": "key",
+      "layer_idx": 29,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 104.222383,
+      "vector_norm_p95_max": 105.674263,
+      "vector_norm_p95_mean": 105.279211
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 0,
+      "kv_role": "key",
+      "layer_idx": 28,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 34.833676,
+      "vector_norm_p95_max": 35.906124,
+      "vector_norm_p95_mean": 35.613064
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 0,
+      "kv_role": "key",
+      "layer_idx": 29,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 26.361308,
+      "vector_norm_p95_max": 27.086805,
+      "vector_norm_p95_mean": 26.876156
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 9,
+      "kv_role": "value",
+      "layer_idx": 29,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 20.952295,
+      "vector_norm_p95_max": 26.542595,
+      "vector_norm_p95_mean": 26.284925
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 9,
+      "kv_role": "key",
+      "layer_idx": 27,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 24.871073,
+      "vector_norm_p95_max": 26.14315,
+      "vector_norm_p95_mean": 25.964046
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 0,
+      "kv_role": "value",
+      "layer_idx": 29,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 19.128616,
+      "vector_norm_p95_max": 26.022886,
+      "vector_norm_p95_mean": 25.737631
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 0,
+      "kv_role": "value",
+      "layer_idx": 28,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 17.328609,
+      "vector_norm_p95_max": 21.908916,
+      "vector_norm_p95_mean": 21.607036
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 9,
+      "kv_role": "value",
+      "layer_idx": 28,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 13.681363,
+      "vector_norm_p95_max": 19.508633,
+      "vector_norm_p95_mean": 19.109608
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 9,
+      "kv_role": "value",
+      "layer_idx": 27,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 15.100816,
+      "vector_norm_p95_max": 18.902601,
+      "vector_norm_p95_mean": 18.571836
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 9,
+      "kv_role": "key",
+      "layer_idx": 28,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 15.190239,
+      "vector_norm_p95_max": 16.459152,
+      "vector_norm_p95_mean": 16.198954
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 0,
+      "kv_role": "key",
+      "layer_idx": 27,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 12.211136,
+      "vector_norm_p95_max": 12.862153,
+      "vector_norm_p95_mean": 12.754932
+    },
+    {
+      "cache_kind": "self_attention",
+      "chunks": [
+        23,
+        24,
+        25,
+        26
+      ],
+      "head_idx": 0,
+      "kv_role": "value",
+      "layer_idx": 27,
+      "outlier_fraction_med3_max": 0.0,
+      "sample_count": 4,
+      "vector_norm_mean_mean": 8.676745,
+      "vector_norm_p95_max": 11.085998,
+      "vector_norm_p95_mean": 10.752754
+    }
+  ]
+}

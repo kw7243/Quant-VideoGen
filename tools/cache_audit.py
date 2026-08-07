@@ -524,6 +524,7 @@ class _Collector:
             "layout": resolved_context.get("layout"),
             "chunk_idx": resolved_context.get("chunk_idx"),
             "cache_position": resolved_context.get("cache_position"),
+            "source_head_indices": resolved_context.get("source_head_indices"),
             "packed_quantized_span": bool(resolved_context.get("packed_quantized_span", False)),
             "stats_status": "pending",
             "stats": {},
@@ -744,10 +745,19 @@ def _cache_tensor_stats(tensor: Any, info: dict[str, Any], *, max_time_points: i
     bhsd = bhsd.float()
     batch, heads, seq_len, head_dim = [int(dim) for dim in bhsd.shape]
     vector_norm = th.linalg.vector_norm(bhsd, dim=-1)
+    source_head_indices = info.get("source_head_indices")
+    if (
+        not isinstance(source_head_indices, list)
+        or len(source_head_indices) != heads
+        or any(not isinstance(item, int) for item in source_head_indices)
+    ):
+        source_head_indices = list(range(heads))
+
     result["norms"] = {
         "layout": "BHSD",
         "batch": batch,
         "heads": heads,
+        "head_indices": source_head_indices,
         "cache_positions": seq_len,
         "head_dim": head_dim,
         "vector_norm_percentiles": _quantiles(vector_norm),
@@ -759,7 +769,7 @@ def _cache_tensor_stats(tensor: Any, info: dict[str, Any], *, max_time_points: i
         head_values = vector_norm[:, head_idx, :].reshape(-1)
         per_head.append(
             {
-                "head_idx": head_idx,
+                "head_idx": source_head_indices[head_idx],
                 **_mean_std(head_values),
                 "p95": _quantiles(head_values, (95,))["95"],
                 "outlier_fraction_med3": _outlier_fraction(head_values)["fraction"],
@@ -1164,8 +1174,51 @@ def _parse_roles(value: str) -> list[str]:
     return result
 
 
+def _parse_optional_int_list(value: str | None, available: Sequence[int], *, label: str) -> list[int] | None:
+    if value is None or value.lower() == "all":
+        return None
+    return _parse_int_list(value, available, label=label)
+
+
+def _head_count_for_info(info: dict[str, Any]) -> int | None:
+    shape = info.get("shape")
+    layout = info.get("layout")
+    if not isinstance(shape, list) or len(shape) != 4:
+        return None
+    head_axis = 1 if layout == "BHSD" else 2 if layout == "BSHD" else None
+    if head_axis is None:
+        return None
+    head_count = shape[head_axis]
+    return head_count if isinstance(head_count, int) else None
+
+
+def _estimated_subset_bytes(info: dict[str, Any], source_head_indices: list[int] | None) -> int:
+    estimated_bytes = int(info.get("estimated_bytes") or 0)
+    if source_head_indices is None:
+        return estimated_bytes
+    head_count = _head_count_for_info(info)
+    if head_count is None:
+        raise ValueError(f"cannot infer head count for selected tensor {info.get('path')}")
+    missing = [head for head in source_head_indices if head < 0 or head >= head_count]
+    if missing:
+        raise ValueError(f"requested heads are not available for {info.get('path')}: {missing}")
+    return int(estimated_bytes * len(source_head_indices) // head_count)
+
+
+def _slice_tensor_heads(tensor: Any, info: dict[str, Any], source_head_indices: list[int] | None) -> Any:
+    if source_head_indices is None:
+        return tensor
+    layout = info.get("layout")
+    head_axis = 1 if layout == "BHSD" else 2 if layout == "BSHD" else None
+    if head_axis is None:
+        raise ValueError(f"cannot slice heads for unsupported layout {layout!r}")
+    th = _ensure_torch()
+    index = th.tensor(source_head_indices, dtype=th.long, device=tensor.device)
+    return tensor.index_select(head_axis, index)
+
+
 def _context_for_subset_record(info: dict[str, Any]) -> dict[str, Any]:
-    return {
+    context = {
         "cache_kind": info.get("cache_kind"),
         "layer_idx": info.get("layer_idx"),
         "kv_role": info.get("kv_role"),
@@ -1173,6 +1226,9 @@ def _context_for_subset_record(info: dict[str, Any]) -> dict[str, Any]:
         "chunk_idx": info.get("chunk_idx"),
         "cache_position": info.get("cache_position"),
     }
+    if info.get("source_head_indices") is not None:
+        context["source_head_indices"] = info.get("source_head_indices")
+    return context
 
 
 def create_subset_artifact(
@@ -1182,6 +1238,7 @@ def create_subset_artifact(
     subset_layers: str | None = None,
     subset_chunks: str | None = None,
     subset_roles: str = "key,value",
+    subset_heads: str | None = None,
     subset_cache_kind: str = "self_attention",
     max_subset_bytes: int = DEFAULT_MAX_SUBSET_BYTES,
     trust_pickle: bool = True,
@@ -1207,9 +1264,19 @@ def create_subset_artifact(
     layers = _parse_int_list(subset_layers, [int(info["layer_idx"]) for info in candidates], label="layer")
     chunks = _parse_int_list(subset_chunks, [int(info["chunk_idx"]) for info in candidates], label="chunk")
     roles = _parse_roles(subset_roles)
+    available_heads = sorted(
+        {
+            head_idx
+            for info in candidates
+            for head_count in [_head_count_for_info(info)]
+            if head_count is not None
+            for head_idx in range(head_count)
+        }
+    )
+    source_head_indices = _parse_optional_int_list(subset_heads, available_heads, label="head")
 
     selected = [
-        info
+        {**info, "source_head_indices": source_head_indices}
         for info in candidates
         if info.get("layer_idx") in layers
         and info.get("chunk_idx") in chunks
@@ -1224,7 +1291,7 @@ def create_subset_artifact(
             str(item.get("path") or ""),
         ),
     )
-    selected_bytes = sum(int(info.get("estimated_bytes") or 0) for info in selected)
+    selected_bytes = sum(_estimated_subset_bytes(info, source_head_indices) for info in selected)
     if not selected:
         raise ValueError("subset selection matched no tensors")
     if selected_bytes > max_subset_bytes:
@@ -1247,6 +1314,7 @@ def create_subset_artifact(
         tensor = path_to_tensor.get(str(info["path"]))
         if tensor is None:
             raise RuntimeError(f"selected tensor missing after full load: {info['path']}")
+        sliced_tensor = _slice_tensor_heads(tensor, info, source_head_indices)
         records.append(
             {
                 "source_path": info["path"],
@@ -1254,7 +1322,9 @@ def create_subset_artifact(
                 "source_shape": info.get("shape"),
                 "source_dtype": info.get("dtype"),
                 "source_estimated_bytes": info.get("estimated_bytes"),
-                "tensor": tensor.detach().cpu().clone(),
+                "source_head_indices": source_head_indices,
+                "selected_estimated_bytes": _estimated_subset_bytes(info, source_head_indices),
+                "tensor": sliced_tensor.detach().cpu().clone(),
             }
         )
 
@@ -1273,6 +1343,7 @@ def create_subset_artifact(
                 "layers": layers,
                 "roles": roles,
                 "chunks": chunks,
+                "heads": source_head_indices if source_head_indices is not None else "all",
             },
             "byte_guards": {
                 "max_subset_bytes": max_subset_bytes,
@@ -1524,6 +1595,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Comma-separated roles for --make-subset; accepts key,value or k,v",
     )
     parser.add_argument(
+        "--subset-heads",
+        default=None,
+        help="Comma-separated source head indices for --make-subset, or all/default for every head",
+    )
+    parser.add_argument(
         "--subset-cache-kind",
         default="self_attention",
         help="Cache kind for --make-subset selection, default self_attention",
@@ -1567,6 +1643,7 @@ def main(argv: list[str] | None = None) -> int:
                 subset_layers=args.subset_layers,
                 subset_chunks=args.subset_chunks,
                 subset_roles=args.subset_roles,
+                subset_heads=args.subset_heads,
                 subset_cache_kind=args.subset_cache_kind,
                 max_subset_bytes=args.max_subset_bytes,
                 trust_pickle=args.trust_pickle,

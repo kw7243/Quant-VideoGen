@@ -159,6 +159,42 @@ def test_cache_audit_real_path_subset_schema(tmp_path):
     assert summary["stats_aggregates"]["chunk_drift"]
 
 
+def test_cache_audit_subset_head_selection_preserves_source_indices(tmp_path):
+    cache_audit = _load_cache_audit_module()
+    artifact = tmp_path / "synthetic_chunked_kv_cache.pt"
+    subset = tmp_path / "subset_heads.pt"
+    _write_chunked_synthetic_artifact(artifact)
+
+    manifest = cache_audit.create_subset_artifact(
+        artifact,
+        subset,
+        subset_layers="1",
+        subset_chunks="2",
+        subset_roles="key,value",
+        subset_heads="1",
+        max_subset_bytes=10 * 1024**2,
+    )
+    assert manifest["selected_tensor_count"] == 2
+    assert manifest["selection"]["heads"] == [1]
+    assert manifest["byte_guards"]["selected_estimated_bytes"] == 4608
+
+    summary = cache_audit.audit_artifact(
+        subset,
+        stats_mode="auto",
+        max_full_load_bytes=10 * 1024**2,
+        max_total_stat_bytes=10 * 1024**2,
+        max_tensor_stat_bytes=10 * 1024**2,
+    )
+
+    tensors = {item["path"]: item for item in summary["tensors"]}
+    k_info = tensors["kv_cache[1].k.chunks[2]"]
+    assert k_info["shape"] == [1, 72, 1, 8]
+    assert k_info["source_head_indices"] == [1]
+    assert k_info["stats"]["norms"]["head_indices"] == [1]
+    assert k_info["stats"]["per_head"][0]["head_idx"] == 1
+    assert summary["stats_aggregates"]["per_head_summary"][0]["head_idx"] == 1
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmpdir:
         test_cache_audit_schema_and_stats(Path(tmpdir))
@@ -166,3 +202,5 @@ if __name__ == "__main__":
         test_cache_audit_metadata_only_guard(Path(tmpdir))
     with tempfile.TemporaryDirectory() as tmpdir:
         test_cache_audit_real_path_subset_schema(Path(tmpdir))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_cache_audit_subset_head_selection_preserves_source_indices(Path(tmpdir))

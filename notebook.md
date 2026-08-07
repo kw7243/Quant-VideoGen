@@ -723,3 +723,113 @@ Expand the subset only around the observed structure: layers 27-29, heads 0 and
 pre/post fake-HQMQ cache dump so direct cache quantization error and
 attention-output error can be measured before any video-quality or novelty
 claim.
+
+## 2026-08-07 - Focused Cache Anomaly Audit
+
+Task: run the bounded follow-up around the observed K/V, head, and chunk
+structure without broad-loading the 7.86 GB full dump for open-ended stats. No
+Slurm jobs were submitted, inspected, canceled, or modified, and pending jobs
+`1295590` and `1316140` were left as separate waits.
+
+Isolation and base:
+
+```text
+pwd -P: /afs/csail.mit.edu/u/k/kwen1/.treehouse/quant-videogen-d60f5d/7/quant-videogen
+git rev-parse --show-toplevel: /afs/csail.mit.edu/u/k/kwen1/.treehouse/quant-videogen-d60f5d/7/quant-videogen
+branch: fm/qvg-focused-cache-anomaly-audit
+base: kw7243/fm/qvg-bounded-cache-stats-analysis
+```
+
+Tooling change:
+
+- Added `tools/cache_audit.py --subset-heads` for bounded subset extraction by
+  source head index.
+- Sliced heads preserve their original source ids in `source_head_indices`,
+  `stats.norms.head_indices`, and aggregate `head_idx` summaries, so a subset
+  containing heads `0,9` does not silently relabel head 9 as local head 1.
+- Added a synthetic CPU test covering BSHD head slicing and source-head
+  preservation.
+
+Real artifact:
+
+```text
+/data/scratch-fast/kwen1/qvg-self-forcing-smoke-results/hqmq_fake_27f_1213946/kv_dumps/kv_cache_frames27.pt
+```
+
+Focused subset selection:
+
+- Self-attention layers `27,28,29`.
+- Roles `key,value`.
+- Chunks `23,24,25,26`.
+- Source heads `0,9`.
+
+Subset extraction was run from staged repo:
+
+```text
+/afs/csail.mit.edu/u/k/kwen1/.treehouse/quant-videogen-d60f5d/7/quant-videogen/staging/20260806_230053-36720c-118e8ab-code
+```
+
+Stats audit was run from staged repo:
+
+```text
+/afs/csail.mit.edu/u/k/kwen1/.treehouse/quant-videogen-d60f5d/7/quant-videogen/staging/20260806_230149-5bbdd1-118e8ab-code
+```
+
+Byte guards and subset size:
+
+- Full source dump size: `7858486627` bytes.
+- `max_subset_bytes`: `134217728`.
+- Selected tensor bytes: `19169280`.
+- Subset file size: `19182930`.
+- Stats run `--max-full-load-bytes`: `134217728`.
+- Stats run `--max-total-stat-bytes`: `134217728`.
+- Stats run `--max-tensor-stat-bytes`: `16777216`.
+- Stats status: `stats_computed` for all 24 selected tensors.
+
+Committed analysis files:
+
+```text
+analysis/cache_audit_frames27_focused_subset_manifest.json
+analysis/cache_audit_frames27_focused_bounded_stats.json
+analysis/cache_audit_frames27_focused_findings.json
+analysis/cache_audit_frames27_focused_summary.md
+```
+
+Private Firstmate copies:
+
+```text
+/data/scratch-fast/kwen1/firstmate/data/qvg-focused-cache-anomaly-audit/cache_audit_frames27_l27-29_h0-9_c23-26_subset.pt
+/data/scratch-fast/kwen1/firstmate/data/qvg-focused-cache-anomaly-audit/cache_audit_frames27_l27-29_h0-9_c23-26_subset_manifest.json
+/data/scratch-fast/kwen1/firstmate/data/qvg-focused-cache-anomaly-audit/cache_audit_frames27_l27-29_h0-9_c23-26_bounded_stats.json
+```
+
+Main results:
+
+- Layer 29 K head 9 remains the dominant vector-norm outlier in the focused
+  window: p95 mean `105.279`, max `105.674` across chunks `23-26`.
+- The next highest sampled head is layer 28 K head 0: p95 mean `35.613`, max
+  `35.906`.
+- Layer 29 K head 0 is not another layer-29 anomaly: p95 mean `26.876`.
+- The chunk-26 radius-proxy jump is not one-chunk-specific. The 4-bit
+  radius-only relative L2 proxy is low at chunk 23 (`0.001434` mean), jumps at
+  chunk 24 (`0.047553`), and stays high at chunks 25 (`0.047646`) and 26
+  (`0.047883`).
+- K/V asymmetry persists: K vector-norm p95 mean `55.423` versus V `21.484`;
+  K tuple4 radius outlier fraction mean `0.221843` versus V `0.001056`; K
+  4-bit radius-only proxy mean `0.047273` versus V `0.024985`; V temporal
+  relative-delta p95 mean `1.410369` versus K `0.529423`.
+
+Interpretation guard:
+
+- The radius-only proxy preserves tuple directions and is not direct HQMQ
+  direction-codebook error.
+- These results do not claim video quality, memory reduction, latency speedup,
+  systems gains, or novelty.
+
+Next smallest functional probe:
+
+Once attention-capture job `1316140` finishes, inspect its capture manifest and
+run one CPU offline attention-error probe on captured layer 29 head 9 around
+the chunk `23 -> 24` transition, with head 0 as control and K-only/V-only
+variants separated. Measure attention logit/probability/output sensitivity
+before any video-quality claim.
